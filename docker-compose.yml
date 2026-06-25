@@ -1,0 +1,10 @@
+services:
+  chess-compare:
+    build: .
+    ports:
+      - "${PORT:-3001}:3001"
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      NODE_ENV: production
+      PORT: 3001
+    restart: unless-stopped

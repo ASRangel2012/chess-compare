@@ -1,0 +1,124 @@
+/* Design system — light/dark via CSS variables, no hardcoded colors in components */
+
+:root {
+  color-scheme: light dark;
+
+  /* Backgrounds */
+  --color-background-primary: #fcfcfc;
+  --color-background-secondary: #f8f8f8;
+  --color-background-tertiary: #f3f3f3;
+
+  /* Text */
+  --color-text-primary: rgba(20, 20, 20, 0.94);
+  --color-text-secondary: rgba(20, 20, 20, 0.74);
+  --color-text-tertiary: rgba(20, 20, 20, 0.54);
+
+  /* Borders & fills */
+  --color-border-tertiary: rgba(20, 20, 20, 0.08);
+  --color-border-secondary: rgba(20, 20, 20, 0.12);
+  --color-fill-secondary: rgba(20, 20, 20, 0.06);
+  --color-fill-tertiary: rgba(20, 20, 20, 0.04);
+
+  /* Semantic */
+  --color-accent: #3685bf;
+  --color-accent-hover: #2e76ab;
+  --color-success: #1f8a65;
+  --color-success-muted: rgba(31, 138, 101, 0.12);
+  --color-danger: #cf2d56;
+  --color-danger-muted: rgba(207, 45, 86, 0.1);
+  --color-warning: #c08532;
+  --color-teal: #4c7f8c;
+
+  /* Player accents */
+  --color-player1: #3685bf;
+  --color-player1-muted: rgba(54, 133, 191, 0.12);
+  --color-player2: #7754d9;
+  --color-player2-muted: rgba(119, 84, 217, 0.12);
+
+  /* Layout */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --font-sans: "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "Cascadia Code", "Consolas", monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-background-primary: #181818;
+    --color-background-secondary: #141414;
+    --color-background-tertiary: #1e1e1e;
+
+    --color-text-primary: rgba(228, 228, 228, 0.92);
+    --color-text-secondary: rgba(228, 228, 228, 0.55);
+    --color-text-tertiary: rgba(228, 228, 228, 0.37);
+
+    --color-border-tertiary: rgba(228, 228, 228, 0.08);
+    --color-border-secondary: rgba(228, 228, 228, 0.12);
+    --color-fill-secondary: rgba(228, 228, 228, 0.08);
+    --color-fill-tertiary: rgba(228, 228, 228, 0.04);
+
+    --color-accent: #599ce7;
+    --color-accent-hover: #6aabe9;
+    --color-success: #3fa266;
+    --color-success-muted: rgba(63, 162, 102, 0.15);
+    --color-danger: #fc6b83;
+    --color-danger-muted: rgba(252, 107, 131, 0.12);
+    --color-warning: #f1b467;
+    --color-teal: #81a1c1;
+
+    --color-player1: #7bafe9;
+    --color-player1-muted: rgba(123, 175, 233, 0.12);
+    --color-player2: #9386f2;
+    --color-player2-muted: rgba(147, 134, 242, 0.12);
+  }
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --color-background-primary: #fcfcfc;
+  --color-background-secondary: #f8f8f8;
+  --color-background-tertiary: #f3f3f3;
+  --color-text-primary: rgba(20, 20, 20, 0.94);
+  --color-text-secondary: rgba(20, 20, 20, 0.74);
+  --color-text-tertiary: rgba(20, 20, 20, 0.54);
+  --color-border-tertiary: rgba(20, 20, 20, 0.08);
+  --color-border-secondary: rgba(20, 20, 20, 0.12);
+  --color-fill-secondary: rgba(20, 20, 20, 0.06);
+  --color-fill-tertiary: rgba(20, 20, 20, 0.04);
+  --color-accent: #3685bf;
+  --color-accent-hover: #2e76ab;
+  --color-success: #1f8a65;
+  --color-danger: #cf2d56;
+  --color-player1: #3685bf;
+  --color-player1-muted: rgba(54, 133, 191, 0.12);
+  --color-player2: #7754d9;
+  --color-player2-muted: rgba(119, 84, 217, 0.12);
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --color-background-primary: #181818;
+  --color-background-secondary: #141414;
+  --color-background-tertiary: #1e1e1e;
+  --color-text-primary: rgba(228, 228, 228, 0.92);
+  --color-text-secondary: rgba(228, 228, 228, 0.55);
+  --color-text-tertiary: rgba(228, 228, 228, 0.37);
+  --color-border-tertiary: rgba(228, 228, 228, 0.08);
+  --color-border-secondary: rgba(228, 228, 228, 0.12);
+  --color-fill-secondary: rgba(228, 228, 228, 0.08);
+  --color-fill-tertiary: rgba(228, 228, 228, 0.04);
+  --color-accent: #599ce7;
+  --color-accent-hover: #6aabe9;
+  --color-success: #3fa266;
+  --color-danger: #fc6b83;
+  --color-player1: #7bafe9;
+  --color-player1-muted: rgba(123, 175, 233, 0.12);
+  --color-player2: #9386f2;
+  --color-player2-muted: rgba(147, 134, 242, 0.12);
+}
