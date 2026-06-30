@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef, Fragment } from "react";
 import {
   IconExternalLink,
   IconCircleFilled,
@@ -36,7 +36,14 @@ export function HeadToHeadHistory({
   loading = false,
 }: HeadToHeadHistoryProps) {
   const [selectedUrl, setSelectedUrl] = useState<string | null>(null);
-  const selectedGame = summary.games.find((g) => g.url === selectedUrl) ?? null;
+  const viewerRef = useRef<HTMLTableRowElement | null>(null);
+
+  // When a game is opened, bring its board into view so you don't have to scroll.
+  useEffect(() => {
+    if (selectedUrl && viewerRef.current) {
+      viewerRef.current.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+  }, [selectedUrl]);
 
   if (loading && summary.totalGames === 0) {
     return (
@@ -98,31 +105,6 @@ export function HeadToHeadHistory({
         replay it on the board.
       </p>
 
-      {selectedGame && (
-        <div className="h2h-viewer">
-          <div className="h2h-viewer-head">
-            <span>
-              <span className="eco-badge">{selectedGame.eco}</span>{" "}
-              {selectedGame.opening} · {formatDate(selectedGame.date)}
-            </span>
-            <a
-              href={selectedGame.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="h2h-link"
-            >
-              Open on Chess.com <IconExternalLink size={13} />
-            </a>
-          </div>
-          <GameViewer
-            pgn={selectedGame.pgn}
-            orientation={selectedGame.player1Color}
-            whiteLabel={selectedGame.player1Color === "white" ? player1Name : player2Name}
-            blackLabel={selectedGame.player1Color === "white" ? player2Name : player1Name}
-          />
-        </div>
-      )}
-
       <table className="opening-table h2h-table">
         <thead>
           <tr>
@@ -136,7 +118,8 @@ export function HeadToHeadHistory({
         </thead>
         <tbody>
           {summary.games.map((g) => (
-            <tr key={g.url} className={g.url === selectedUrl ? "row-active" : ""}>
+            <Fragment key={g.url}>
+            <tr className={g.url === selectedUrl ? "row-active" : ""}>
               <td>{formatDate(g.date)}</td>
               <td>
                 <span className="eco-badge">{g.eco}</span> {g.opening}
@@ -185,6 +168,35 @@ export function HeadToHeadHistory({
                 </a>
               </td>
             </tr>
+            {g.url === selectedUrl && (
+              <tr className="h2h-viewer-row" ref={viewerRef}>
+                <td colSpan={6}>
+                  <div className="h2h-viewer">
+                    <div className="h2h-viewer-head">
+                      <span>
+                        <span className="eco-badge">{g.eco}</span> {g.opening} ·{" "}
+                        {formatDate(g.date)}
+                      </span>
+                      <a
+                        href={g.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="h2h-link"
+                      >
+                        Open on Chess.com <IconExternalLink size={13} />
+                      </a>
+                    </div>
+                    <GameViewer
+                      pgn={g.pgn}
+                      orientation={g.player1Color}
+                      whiteLabel={g.player1Color === "white" ? player1Name : player2Name}
+                      blackLabel={g.player1Color === "white" ? player2Name : player1Name}
+                    />
+                  </div>
+                </td>
+              </tr>
+            )}
+            </Fragment>
           ))}
         </tbody>
       </table>

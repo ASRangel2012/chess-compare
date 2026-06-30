@@ -11,6 +11,10 @@ const app = express();
 const PORT = process.env.PORT ?? 3001;
 const isProduction = process.env.NODE_ENV === "production";
 
+// Model is overridable via env so a retired snapshot can be swapped without a
+// code change. Haiku is fast and cheap, which suits these short analyses.
+const MODEL = process.env.ANTHROPIC_MODEL ?? "claude-haiku-4-5";
+
 app.set("trust proxy", 1);
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
@@ -120,7 +124,7 @@ app.post("/api/analyze", rateLimit, async (req, res) => {
   if (!anthropic) {
     return res.status(503).json({
       error:
-        "ANTHROPIC_API_KEY is not configured. Copy .env.example to .env and add your key.",
+        "ANTHROPIC_API_KEY is not configured. Copy .env to .env and add your key.",
     });
   }
 
@@ -150,7 +154,7 @@ Focus on: opening preferences, tactical vs positional tendencies, game length pa
 
   try {
     const message = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
+      model: MODEL,
       max_tokens: 1500,
       messages: [{ role: "user", content: prompt }],
     });

@@ -41,7 +41,41 @@ cp .env.example .env
 npm run dev
 ```
 
-Open [http://localhost:5173](http://localhost:5173).
+Open [http://localhost:5173](http://localhost:5173). `npm run dev` picks the first free
+API port starting at `3001` and points the Vite proxy at it, so a busy port won't
+break startup.
+
+## Configuration
+
+The backend reads these from `.env` (loaded via `dotenv`):
+
+| Variable | Required | Default | Purpose |
+|----------|----------|---------|---------|
+| `ANTHROPIC_API_KEY` | AI analysis only | — | Server-side key for the Claude proxy. Never sent to the browser. |
+| `ANTHROPIC_MODEL` | No | `claude-haiku-4-5` | Override the Claude model (e.g. `claude-sonnet-5` for longer, richer profiles). |
+| `PORT` | No | `3001` | API port. The dev launcher auto-selects the next free port if this is taken; the Vite proxy follows it. |
+
+### Running without an API key
+
+Every Chess.com feature — profiles, rating/record comparison, openings, head-to-head
+history, and the inline game replay — works with **no key**, because that data is fetched
+client-side. Only the **AI Play Style Analysis** card needs `ANTHROPIC_API_KEY`; without
+one it degrades gracefully (the card shows a "configure a key" message) and the rest of the
+app is unaffected.
+
+## Deployment
+
+In production a single Express process serves both the built SPA and the API on one port:
+
+```bash
+npm run build
+ANTHROPIC_API_KEY=sk-ant-... NODE_ENV=production npm start
+```
+
+Or use Docker (below). On a host (Render, Railway, Fly, a VPS, etc.), set
+`ANTHROPIC_API_KEY` as an environment variable in the host's settings rather than committing
+it. A hosted instance lets reviewers try the AI analysis without supplying their own key —
+the key stays server-side, and the per-IP rate limit (10 req/min) guards the budget.
 
 ## IntelliJ IDEA / WebStorm
 
@@ -76,7 +110,7 @@ TypeScript is split across `tsconfig.app.json` (React `src/`) and `tsconfig.node
 ## Docker
 
 ```bash
-cp .env.example .env
+cp .env .env
 # Add ANTHROPIC_API_KEY to .env
 
 docker compose up --build

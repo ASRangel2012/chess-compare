@@ -900,3 +900,14 @@ a:hover {
   background: var(--color-accent);
   color: #fff;
 }
+
+/* Inline expandable board row (dropdown beneath the clicked game) */
+.h2h-viewer-row > td {
+  padding: 0;
+  background: transparent;
+  border-top: none;
+}
+
+.h2h-viewer-row .h2h-viewer {
+  margin: 0 0 var(--space-sm);
+}

@@ -29,7 +29,10 @@ export function GameViewer({
 
   const maxIndex = plies.length - 1;
   const clamp = (i: number) => Math.max(0, Math.min(maxIndex, i));
-  const current = plies[index];
+  // Clamp on render too, so a stale index (e.g. mid game-switch) can never
+  // index past the end of the ply list and crash.
+  const safeIndex = clamp(index);
+  const current = plies[safeIndex];
   const lastMove = current.lastMove;
 
   // Render order: rank 8 -> 1 and file a -> h (flipped for black orientation).
@@ -83,19 +86,19 @@ export function GameViewer({
 
       <div className="game-viewer-side">
         <div className="game-viewer-controls">
-          <button type="button" onClick={() => setIndex(0)} disabled={index === 0} aria-label="First move">
+          <button type="button" onClick={() => setIndex(0)} disabled={safeIndex === 0} aria-label="First move">
             <IconPlayerTrackPrev size={16} />
           </button>
-          <button type="button" onClick={() => setIndex((i) => clamp(i - 1))} disabled={index === 0} aria-label="Previous move">
+          <button type="button" onClick={() => setIndex((i) => clamp(i - 1))} disabled={safeIndex === 0} aria-label="Previous move">
             <IconChevronLeft size={16} />
           </button>
           <span className="game-viewer-ply">
-            {index === 0 ? "Start" : `${current.san}`} · {index}/{maxIndex}
+            {safeIndex === 0 ? "Start" : `${current.san}`} · {safeIndex}/{maxIndex}
           </span>
-          <button type="button" onClick={() => setIndex((i) => clamp(i + 1))} disabled={index === maxIndex} aria-label="Next move">
+          <button type="button" onClick={() => setIndex((i) => clamp(i + 1))} disabled={safeIndex === maxIndex} aria-label="Next move">
             <IconChevronRight size={16} />
           </button>
-          <button type="button" onClick={() => setIndex(maxIndex)} disabled={index === maxIndex} aria-label="Last move">
+          <button type="button" onClick={() => setIndex(maxIndex)} disabled={safeIndex === maxIndex} aria-label="Last move">
             <IconPlayerTrackNext size={16} />
           </button>
         </div>
@@ -109,7 +112,7 @@ export function GameViewer({
                 {isWhiteMove && <span className="move-no">{Math.floor(i / 2) + 1}.</span>}
                 <button
                   type="button"
-                  className={`move-san ${plyIndex === index ? "active" : ""}`}
+                  className={`move-san ${plyIndex === safeIndex ? "active" : ""}`}
                   onClick={() => setIndex(plyIndex)}
                 >
                   {ply.san}

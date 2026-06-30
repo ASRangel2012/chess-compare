@@ -12,7 +12,7 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
-# env files
+# env files — ignore real env files, keep the example template
 .env
 .env.*
 !.env.example
@@ -25,4 +25,3 @@ pnpm-debug.log*
 # OS files
 .DS_Store
 Thumbs.db
-/.env.example
