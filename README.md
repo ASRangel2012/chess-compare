@@ -27,6 +27,7 @@ In **production/Docker**, a single Express process serves both the static React 
 - Player profiles & rating comparison (bullet, blitz, rapid, daily)
 - Opening analysis from recent PGN data
 - **Head-to-head history** — scans monthly archives for direct matchups
+- **Inline game replay** — step through any head-to-head game on a board, powered by a small dependency-free PGN/SAN engine (`src/lib/chess.ts`)
 - Game length distribution
 - AI play style profiles via Claude
 
@@ -98,6 +99,25 @@ docker run -p 3001:3001 -e ANTHROPIC_API_KEY=sk-ant-... chess-compare
 | `npm run build` | Production React build + bundled server |
 | `npm start` | Run production server (serves UI + API) |
 | `npm run prod` | Build + start (used by IntelliJ **Production** run config) |
+| `npm run typecheck` | Type-check the project (`tsc -b`) |
+| `npm test` | Run the Vitest unit suite |
+| `npm run test:watch` | Run Vitest in watch mode |
+
+## Testing & CI
+
+Unit tests live next to the code they cover (`src/lib/*.test.ts`) and run on [Vitest](https://vitest.dev):
+
+```bash
+npm test
+```
+
+They cover the pure data layer — PGN parsing (`deriveTimeClass`, `normalizeResult`, opening-name resolution), per-player aggregation, and head-to-head summarization — plus a mocked-`fetch` test that verifies the archive fetcher's concurrency limit, caching, early-stop, and newest-first ordering.
+
+`.github/workflows/ci.yml` runs type-check → tests → production build on every push and pull request.
+
+## Network layer
+
+Chess.com archives are fetched with bounded concurrency (6 in flight) rather than serially, with in-memory caching of the immutable archives list and completed months, a 15s per-request timeout, and bounded retry/back-off on HTTP 429.
 
 ## Head-to-head
 

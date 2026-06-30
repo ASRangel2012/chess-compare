@@ -48,6 +48,7 @@ export function analyzeHeadToHead(
       player1Rating: p1.rating,
       player2Rating: p2.rating,
       moveCount,
+      pgn: game.pgn,
     });
   }
 

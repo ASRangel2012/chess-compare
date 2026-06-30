@@ -1,9 +1,12 @@
+import { useState } from "react";
 import {
   IconExternalLink,
   IconCircleFilled,
   IconLoader2,
+  IconPlayerPlay,
 } from "@tabler/icons-react";
 import type { HeadToHeadSummary } from "../lib/types";
+import { GameViewer } from "./GameViewer";
 
 interface HeadToHeadHistoryProps {
   player1Name: string;
@@ -32,6 +35,9 @@ export function HeadToHeadHistory({
   summary,
   loading = false,
 }: HeadToHeadHistoryProps) {
+  const [selectedUrl, setSelectedUrl] = useState<string | null>(null);
+  const selectedGame = summary.games.find((g) => g.url === selectedUrl) ?? null;
+
   if (loading && summary.totalGames === 0) {
     return (
       <div className="card">
@@ -88,8 +94,34 @@ export function HeadToHeadHistory({
 
       <p className="h2h-meta">
         {summary.totalGames} game{summary.totalGames !== 1 ? "s" : ""} found
-        (scanned from {player1Name}&apos;s monthly archives)
+        (scanned from {player1Name}&apos;s monthly archives) — press ▶ on a row to
+        replay it on the board.
       </p>
+
+      {selectedGame && (
+        <div className="h2h-viewer">
+          <div className="h2h-viewer-head">
+            <span>
+              <span className="eco-badge">{selectedGame.eco}</span>{" "}
+              {selectedGame.opening} · {formatDate(selectedGame.date)}
+            </span>
+            <a
+              href={selectedGame.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="h2h-link"
+            >
+              Open on Chess.com <IconExternalLink size={13} />
+            </a>
+          </div>
+          <GameViewer
+            pgn={selectedGame.pgn}
+            orientation={selectedGame.player1Color}
+            whiteLabel={selectedGame.player1Color === "white" ? player1Name : player2Name}
+            blackLabel={selectedGame.player1Color === "white" ? player2Name : player1Name}
+          />
+        </div>
+      )}
 
       <table className="opening-table h2h-table">
         <thead>
@@ -104,7 +136,7 @@ export function HeadToHeadHistory({
         </thead>
         <tbody>
           {summary.games.map((g) => (
-            <tr key={g.url}>
+            <tr key={g.url} className={g.url === selectedUrl ? "row-active" : ""}>
               <td>{formatDate(g.date)}</td>
               <td>
                 <span className="eco-badge">{g.eco}</span> {g.opening}
@@ -130,7 +162,18 @@ export function HeadToHeadHistory({
                 </span>
                 <span className="h2h-moves">{g.moveCount} moves</span>
               </td>
-              <td>
+              <td className="h2h-actions">
+                <button
+                  type="button"
+                  className="h2h-replay"
+                  onClick={() =>
+                    setSelectedUrl((u) => (u === g.url ? null : g.url))
+                  }
+                  aria-label="Replay game on board"
+                  aria-pressed={g.url === selectedUrl}
+                >
+                  <IconPlayerPlay size={16} />
+                </button>
                 <a
                   href={g.url}
                   target="_blank"

@@ -687,3 +687,216 @@ a:hover {
 .color-dot.black {
   color: var(--color-text-tertiary);
 }
+
+/* ---------------------------------------------------------------------------
+   Head-to-head actions + inline game replay viewer
+   --------------------------------------------------------------------------- */
+
+.h2h-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.h2h-replay,
+.h2h-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-tertiary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: var(--space-xs);
+  border-radius: var(--radius-sm);
+  transition: color 0.15s, background 0.15s;
+}
+
+.h2h-replay:hover,
+.h2h-link:hover {
+  color: var(--color-accent);
+  background: var(--color-fill-secondary);
+}
+
+.h2h-replay[aria-pressed="true"] {
+  color: var(--color-accent);
+  background: var(--color-accent-hover);
+  color: #fff;
+}
+
+.h2h-table tr.row-active {
+  background: var(--color-fill-tertiary);
+}
+
+.h2h-viewer {
+  margin: var(--space-md) 0 var(--space-lg);
+  padding: var(--space-md);
+  border: 1px solid var(--color-border-secondary);
+  border-radius: var(--radius-md);
+  background: var(--color-background-secondary);
+}
+
+.h2h-viewer-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-md);
+  font-size: 0.9rem;
+  color: var(--color-text-secondary);
+}
+
+.h2h-viewer-head .h2h-link {
+  font-size: 0.82rem;
+  gap: 4px;
+}
+
+/* Viewer: board + move panel side by side, stacking on narrow screens */
+.game-viewer {
+  display: flex;
+  gap: var(--space-lg);
+  flex-wrap: wrap;
+  outline: none;
+}
+
+.game-viewer-board-col {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.board-edge-label {
+  font-size: 0.8rem;
+  color: var(--color-text-tertiary);
+  font-family: var(--font-mono);
+}
+
+.chess-board {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  grid-template-rows: repeat(8, 1fr);
+  width: min(360px, 80vw);
+  aspect-ratio: 1 / 1;
+  border: 1px solid var(--color-border-secondary);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  user-select: none;
+}
+
+.board-square {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+/* Classic board tones that read well in both themes */
+.board-square.light {
+  background: #ebe6d8;
+}
+.board-square.dark {
+  background: #9aa7b4;
+}
+.board-square.highlight::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--color-warning);
+  opacity: 0.38;
+}
+
+.piece {
+  position: relative;
+  z-index: 1;
+  font-size: clamp(1.4rem, 6vw, 2rem);
+  line-height: 1;
+}
+.piece.white {
+  color: #fff;
+  text-shadow: 0 0 1px rgba(0, 0, 0, 0.9), 0 1px 2px rgba(0, 0, 0, 0.5);
+}
+.piece.black {
+  color: #1a1a1a;
+  text-shadow: 0 0 1px rgba(255, 255, 255, 0.5);
+}
+
+.game-viewer-side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  flex: 1 1 200px;
+  min-width: 180px;
+}
+
+.game-viewer-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.game-viewer-controls button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-xs) var(--space-sm);
+  border: 1px solid var(--color-border-secondary);
+  border-radius: var(--radius-sm);
+  background: var(--color-background-primary);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+.game-viewer-controls button:hover:not(:disabled) {
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+.game-viewer-controls button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.game-viewer-ply {
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  color: var(--color-text-secondary);
+  margin: 0 auto;
+}
+
+.move-list {
+  list-style: none;
+  margin: 0;
+  padding: var(--space-sm);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 6px;
+  align-content: flex-start;
+  max-height: 300px;
+  overflow-y: auto;
+  border: 1px solid var(--color-border-tertiary);
+  border-radius: var(--radius-sm);
+  background: var(--color-background-primary);
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+}
+
+.move-list .move-no {
+  color: var(--color-text-tertiary);
+  margin-right: 2px;
+}
+
+.move-san {
+  background: none;
+  border: none;
+  color: var(--color-text-primary);
+  cursor: pointer;
+  padding: 1px 4px;
+  border-radius: 4px;
+  font: inherit;
+}
+.move-san:hover {
+  background: var(--color-fill-secondary);
+}
+.move-san.active {
+  background: var(--color-accent);
+  color: #fff;
+}

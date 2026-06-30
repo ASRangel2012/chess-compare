@@ -120,6 +120,8 @@ export interface HeadToHeadGameEntry {
   player1Rating?: number;
   player2Rating?: number;
   moveCount: number;
+  /** Raw PGN, retained so the game can be replayed on an inline board. */
+  pgn: string;
 }
 
 export interface HeadToHeadSummary {

@@ -8,15 +8,103 @@ import type {
 
 const BASE_URL = "https://api.chess.com/pub";
 
-async function fetchJson<T>(url: string): Promise<T> {
-  const res = await fetch(url);
-  if (!res.ok) {
-    if (res.status === 404) {
-      throw new Error(`Player not found: ${url}`);
+/** Per-request timeout so a hung Chess.com request can't hang the UI. */
+const REQUEST_TIMEOUT_MS = 15_000;
+/** How many monthly archives to fetch in parallel. Bounded to stay a good API citizen. */
+const ARCHIVE_CONCURRENCY = 6;
+/** Retry attempts when Chess.com rate-limits us (HTTP 429). */
+const MAX_RATE_LIMIT_RETRIES = 3;
+
+interface FetchOptions {
+  /**
+   * Memoize the resolved JSON by URL. Safe for immutable resources — the
+   * archives list and any *completed* monthly archive never change. The
+   * current (in-progress) month is fetched with `cache: false` so new games
+   * show up on a re-run.
+   */
+  cache?: boolean;
+}
+
+/**
+ * In-memory response cache keyed by URL. We store the in-flight Promise (not
+ * just the resolved value) so concurrent callers for the same URL share a
+ * single network request. Failed requests are evicted so errors aren't sticky.
+ */
+const jsonCache = new Map<string, Promise<unknown>>();
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function requestJson<T>(url: string): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, { signal: controller.signal });
+
+      // Honor Chess.com rate limiting with a bounded backoff before giving up.
+      if (res.status === 429 && attempt < MAX_RATE_LIMIT_RETRIES) {
+        const retryAfter = Number(res.headers.get("Retry-After"));
+        const waitMs = Number.isFinite(retryAfter)
+          ? retryAfter * 1000
+          : 2 ** attempt * 500;
+        await sleep(waitMs);
+        continue;
+      }
+
+      if (!res.ok) {
+        if (res.status === 404) throw new Error(`Player not found: ${url}`);
+        if (res.status === 429) {
+          throw new Error("Chess.com is rate limiting requests. Please retry shortly.");
+        }
+        throw new Error(`Chess.com API error (${res.status})`);
+      }
+
+      return (await res.json()) as T;
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") {
+        throw new Error("Chess.com request timed out. Please try again.");
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
     }
-    throw new Error(`Chess.com API error (${res.status})`);
   }
-  return res.json() as Promise<T>;
+}
+
+async function fetchJson<T>(url: string, opts: FetchOptions = {}): Promise<T> {
+  if (!opts.cache) return requestJson<T>(url);
+
+  const cached = jsonCache.get(url);
+  if (cached) return cached as Promise<T>;
+
+  const promise = requestJson<T>(url);
+  jsonCache.set(url, promise);
+  // Don't cache failures — let the next call retry.
+  promise.catch(() => jsonCache.delete(url));
+  return promise;
+}
+
+/**
+ * Run an async mapper over `items` with at most `limit` operations in flight,
+ * processing items in order and stopping early once `done()` returns true.
+ * Used to fetch monthly archives concurrently instead of one-at-a-time.
+ */
+async function mapInBatches<T, R>(
+  items: T[],
+  limit: number,
+  mapper: (item: T, index: number) => Promise<R>,
+  done: () => boolean
+): Promise<R[]> {
+  const results: R[] = [];
+  for (let i = 0; i < items.length; i += limit) {
+    if (done()) break;
+    const batch = items.slice(i, i + limit);
+    const batchResults = await Promise.all(
+      batch.map((item, j) => mapper(item, i + j))
+    );
+    results.push(...batchResults);
+  }
+  return results;
 }
 
 export async function fetchPlayerProfile(
@@ -36,32 +124,42 @@ export async function fetchPlayerStats(
 }
 
 export async function fetchArchives(username: string): Promise<string[]> {
+  // Archives list is effectively immutable within a session — cache it so the
+  // duplicate lookup from the head-to-head scan is a free hit.
   const data = await fetchJson<ArchivesResponse>(
-    `${BASE_URL}/player/${encodeURIComponent(username)}/games/archives`
+    `${BASE_URL}/player/${encodeURIComponent(username)}/games/archives`,
+    { cache: true }
   );
   return data.archives;
 }
 
 export async function fetchMonthlyGames(
-  archiveUrl: string
+  archiveUrl: string,
+  opts: FetchOptions = {}
 ): Promise<ChessGame[]> {
-  const data = await fetchJson<GamesResponse>(archiveUrl);
+  const data = await fetchJson<GamesResponse>(archiveUrl, opts);
   return data.games;
 }
 
 export async function fetchRecentGames(
   username: string,
-  maxGames = 50
+  maxGames = 50,
+  concurrency = ARCHIVE_CONCURRENCY
 ): Promise<ChessGame[]> {
   const archives = await fetchArchives(username);
-  const recentArchives = [...archives].reverse();
+  const recentArchives = [...archives].reverse(); // most recent month first
   const games: ChessGame[] = [];
 
-  for (const archiveUrl of recentArchives) {
-    if (games.length >= maxGames) break;
-    const monthly = await fetchMonthlyGames(archiveUrl);
-    games.push(...monthly.reverse());
-  }
+  await mapInBatches(
+    recentArchives,
+    concurrency,
+    async (archiveUrl, index) => {
+      // index 0 is the current, still-changing month — don't cache it.
+      const monthly = await fetchMonthlyGames(archiveUrl, { cache: index !== 0 });
+      games.push(...[...monthly].reverse());
+    },
+    () => games.length >= maxGames
+  );
 
   return games.slice(0, maxGames);
 }
@@ -138,22 +236,26 @@ export async function fetchHeadToHeadGames(
   const games: ChessGame[] = [];
   const seen = new Set<string>();
 
-  for (const archiveUrl of recentArchives) {
-    if (games.length >= maxGames) break;
-    const monthly = await fetchMonthlyGames(archiveUrl);
-    for (const game of monthly) {
-      // Only standard chess — exclude chess960 and other variants.
-      if ((game.rules ?? "chess") !== "chess") continue;
-      const white = game.white.username.toLowerCase();
-      const black = game.black.username.toLowerCase();
-      const isMatch =
-        (white === u1 && black === u2) || (white === u2 && black === u1);
-      if (isMatch && !seen.has(game.url)) {
-        seen.add(game.url);
-        games.push(game);
+  await mapInBatches(
+    recentArchives,
+    ARCHIVE_CONCURRENCY,
+    async (archiveUrl, index) => {
+      const monthly = await fetchMonthlyGames(archiveUrl, { cache: index !== 0 });
+      for (const game of monthly) {
+        // Only standard chess — exclude chess960 and other variants.
+        if ((game.rules ?? "chess") !== "chess") continue;
+        const white = game.white.username.toLowerCase();
+        const black = game.black.username.toLowerCase();
+        const isMatch =
+          (white === u1 && black === u2) || (white === u2 && black === u1);
+        if (isMatch && !seen.has(game.url)) {
+          seen.add(game.url);
+          games.push(game);
+        }
       }
-    }
-  }
+    },
+    () => games.length >= maxGames
+  );
 
   return games.sort((a, b) => b.end_time - a.end_time).slice(0, maxGames);
 }
