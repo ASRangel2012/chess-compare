@@ -1,5 +1,10 @@
 import type { ChessGame } from "./types";
-import { parsePgnHeader, normalizeResult } from "./pgnParser";
+import {
+  parsePgnHeader,
+  normalizeResult,
+  extractOpeningName,
+  deriveTimeClass,
+} from "./pgnParser";
 import type { HeadToHeadGameEntry, HeadToHeadSummary } from "./types";
 
 export function analyzeHeadToHead(
@@ -26,8 +31,8 @@ export function analyzeHeadToHead(
     else if (result === "loss") player1Losses++;
     else player1Draws++;
 
-    const opening = parsePgnHeader(game.pgn, "Opening") ?? "Unknown Opening";
-    const eco = parsePgnHeader(game.pgn, "ECO") ?? game.eco ?? "—";
+    const opening = extractOpeningName(game);
+    const eco = parsePgnHeader(game.pgn, "ECO") ?? "—";
     const moveSection = game.pgn.split("\n\n").slice(1).join("\n\n");
     const moveCount = moveSection.match(/\d+\.\s+\S+/g)?.length ?? 0;
 
@@ -36,7 +41,7 @@ export function analyzeHeadToHead(
       date: game.end_time,
       opening,
       eco,
-      timeClass: game.time_class ?? "unknown",
+      timeClass: deriveTimeClass(game),
       rated: game.rated,
       player1Color: isWhite ? "white" : "black",
       player1Result: result,

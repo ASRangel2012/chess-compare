@@ -11,8 +11,51 @@ const app = express();
 const PORT = process.env.PORT ?? 3001;
 const isProduction = process.env.NODE_ENV === "production";
 
+app.set("trust proxy", 1);
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
+
+/**
+ * Lightweight in-memory, per-IP rate limiter for the AI endpoint so a public
+ * deployment can't be abused to burn the Anthropic budget. Fixed-window.
+ * For multi-instance deployments, swap for a shared store (e.g. Redis).
+ */
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_MAX = 10;
+const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+
+function rateLimit(
+  req: express.Request,
+  res: express.Response,
+  next: express.NextFunction
+) {
+  const now = Date.now();
+  const ip = req.ip ?? "unknown";
+  const bucket = rateBuckets.get(ip);
+
+  if (!bucket || now > bucket.resetAt) {
+    rateBuckets.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+    return next();
+  }
+
+  if (bucket.count >= RATE_LIMIT_MAX) {
+    res.setHeader("Retry-After", Math.ceil((bucket.resetAt - now) / 1000));
+    return res.status(429).json({
+      error: "Too many analysis requests. Please wait a minute and try again.",
+    });
+  }
+
+  bucket.count++;
+  next();
+}
+
+// Periodically evict stale buckets so the map can't grow unbounded.
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, bucket] of rateBuckets) {
+    if (now > bucket.resetAt) rateBuckets.delete(ip);
+  }
+}, RATE_LIMIT_WINDOW_MS).unref();
 
 const anthropic = process.env.ANTHROPIC_API_KEY
   ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
@@ -73,7 +116,7 @@ Top openings as Black:
 `.trim();
 }
 
-app.post("/api/analyze", async (req, res) => {
+app.post("/api/analyze", rateLimit, async (req, res) => {
   if (!anthropic) {
     return res.status(503).json({
       error:
@@ -147,6 +190,7 @@ if (isProduction) {
   });
 }
 
+// Entry point.
 app.listen(PORT, () => {
   console.log(
     `Server running on http://localhost:${PORT}${isProduction ? " (production)" : " (API only — use Vite on :5173 for frontend)"}`

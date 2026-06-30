@@ -14,8 +14,10 @@ This is a **split frontend + lightweight backend** app:
 Chess.com data (profiles, stats, PGN archives) is fetched **client-side** — their public API supports browser CORS and needs no auth.
 
 The backend only handles:
-- `POST /api/analyze` — sends aggregated game stats to Claude and returns play-style profiles
+- `POST /api/analyze` — sends aggregated game stats to Claude and returns play-style profiles (per-IP rate limited)
 - `GET /api/health` — health check for Docker
+
+The Anthropic API key stays server-side and is never exposed to the browser. `/api/analyze` is rate limited (10 requests/min per IP, in-memory) so a public deployment can't be abused to burn your API budget.
 
 In **development**, Vite runs on `:5173` and proxies `/api` → Express on `:3001`.
 In **production/Docker**, a single Express process serves both the static React build and the API on `:3001`.
@@ -99,8 +101,8 @@ docker run -p 3001:3001 -e ANTHROPIC_API_KEY=sk-ant-... chess-compare
 
 ## Head-to-head
 
-Chess.com has no dedicated H2H endpoint. The app scans the last 48 months of Player 1's game archives and filters games where the opponent is Player 2.
+Chess.com has no dedicated H2H endpoint. The app scans the last 48 months of Player 1's game archives and filters games where the opponent is Player 2 (standard chess only — chess960 and other variants are excluded). Opening names come from the PGN `ECOUrl` (Chess.com PGNs carry no `Opening` tag), and game format falls back to the PGN `TimeControl` when `time_class` is absent.
 
 ## Theming
 
-CSS variables only (`--color-background-*`, `--color-text-*`, `--color-success`, `--color-danger`). Auto light/dark via `prefers-color-scheme` with manual toggle.
+CSS variables only (`--color-background-*`, `--color-text-*`, `--color-success`, `--color-danger`). Auto light/dark via `prefers-color-scheme`, with a manual toggle that sets `data-theme` on `<html>` so the entire page (including the body background) switches.

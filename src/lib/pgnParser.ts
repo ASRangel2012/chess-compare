@@ -5,6 +5,55 @@ export function parsePgnHeader(pgn: string, tag: string): string | undefined {
   return match?.[1];
 }
 
+/**
+ * Chess.com PGNs do not include an `[Opening "..."]` tag — only `[ECO]` and
+ * `[ECOUrl]`. Derive a human-readable opening name from the ECOUrl slug,
+ * falling back to the top-level `eco` field (which is sometimes a URL).
+ * e.g. ".../openings/Italian-Game-Classical-Variation" -> "Italian Game Classical Variation"
+ */
+export function openingNameFromUrl(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  const slug = url.split("/").filter(Boolean).pop();
+  if (!slug || !slug.includes("-")) return undefined;
+  const name = decodeURIComponent(slug)
+    .replace(/-/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return name || undefined;
+}
+
+/** Resolve the opening name for a game from any available source. */
+export function extractOpeningName(game: ChessGame): string {
+  return (
+    parsePgnHeader(game.pgn, "Opening") ??
+    openingNameFromUrl(parsePgnHeader(game.pgn, "ECOUrl")) ??
+    openingNameFromUrl(game.eco) ??
+    "Unknown Opening"
+  );
+}
+
+/**
+ * Resolve a game's time class. Prefer the API-provided `time_class`; if it is
+ * missing, derive it from the PGN `TimeControl` header. Daily/correspondence
+ * controls use a "moves/seconds-per-move" form (e.g. "1/259200"); live games
+ * use "base" or "base+increment" seconds (e.g. "300+2").
+ */
+export function deriveTimeClass(game: ChessGame): string {
+  if (game.time_class) return game.time_class;
+  const tc = game.time_control ?? parsePgnHeader(game.pgn, "TimeControl");
+  if (!tc) return "unknown";
+  if (tc.includes("/")) return "daily";
+  const [baseStr, incStr] = tc.split("+");
+  const base = Number(baseStr);
+  const inc = Number(incStr ?? 0);
+  if (!Number.isFinite(base)) return "unknown";
+  if (base >= 86400) return "daily";
+  const estimated = base + inc * 40;
+  if (estimated < 180) return "bullet";
+  if (estimated < 600) return "blitz";
+  return "rapid";
+}
+
 export function normalizeResult(
   result: string
 ): "win" | "loss" | "draw" {
@@ -32,11 +81,8 @@ export function parseGame(
   if (!isWhite && !isBlack) return null;
 
   const player = isWhite ? game.white : game.black;
-  const opening =
-    parsePgnHeader(game.pgn, "Opening") ??
-    parsePgnHeader(game.pgn, "ECOUrl") ??
-    "Unknown Opening";
-  const eco = parsePgnHeader(game.pgn, "ECO") ?? game.eco ?? "—";
+  const opening = extractOpeningName(game);
+  const eco = parsePgnHeader(game.pgn, "ECO") ?? "—";
 
   const accuracyStr = parsePgnHeader(game.pgn, "Accuracy");
   const accuracy = accuracyStr ? parseFloat(accuracyStr) : undefined;
@@ -48,7 +94,7 @@ export function parseGame(
     result: normalizeResult(player.result),
     moveCount: countMoves(game.pgn),
     timeControl: game.time_control ?? parsePgnHeader(game.pgn, "TimeControl") ?? "—",
-    timeClass: game.time_class ?? parsePgnHeader(game.pgn, "TimeClass") ?? "unknown",
+    timeClass: deriveTimeClass(game),
     rated: game.rated,
     endTime: game.end_time,
     opponent: isWhite ? game.black.username : game.white.username,

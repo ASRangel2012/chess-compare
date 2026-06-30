@@ -142,6 +142,8 @@ export async function fetchHeadToHeadGames(
     if (games.length >= maxGames) break;
     const monthly = await fetchMonthlyGames(archiveUrl);
     for (const game of monthly) {
+      // Only standard chess — exclude chess960 and other variants.
+      if ((game.rules ?? "chess") !== "chess") continue;
       const white = game.white.username.toLowerCase();
       const black = game.black.username.toLowerCase();
       const isMatch =

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   IconUser,
   IconChartBar,
@@ -25,7 +25,18 @@ export function ChessCompare() {
   const { loading, loadingHeadToHead, analyzingStyle, error, result, compare, retryAiAnalysis } =
     useChessCompare();
 
-  const handleSubmit = (e: React.ChangeEvent) => {
+  // Apply the theme to <html> so the whole page (including body background)
+  // switches, not just the .app container. "auto" defers to prefers-color-scheme.
+  useEffect(() => {
+    const root = document.documentElement;
+    if (theme === "auto") {
+      root.removeAttribute("data-theme");
+    } else {
+      root.setAttribute("data-theme", theme);
+    }
+  }, [theme]);
+
+  const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     compare(player1, player2);
   };
@@ -34,12 +45,11 @@ export function ChessCompare() {
     setTheme((t) => (t === "auto" ? "light" : t === "light" ? "dark" : "auto"));
   };
 
-  const themeAttr = theme === "auto" ? undefined : theme;
   const themeLabel =
     theme === "auto" ? "Auto" : theme === "light" ? "Light" : "Dark";
 
   return (
-    <div className="app" data-theme={themeAttr}>
+    <div className="app">
       <header className="app-header">
         <div>
           <h1>Chess Compare</h1>
