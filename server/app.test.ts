@@ -91,6 +91,24 @@ describe("POST /api/analyze", () => {
     expect(res.status).toBe(400);
   });
 
+  it("rejects a present-but-malformed analysis body with 400 without hanging", async () => {
+    // Regression: an empty `analysis` object used to pass validation, then throw
+    // in buildPrompt outside any try/catch, leaving the request to hang forever.
+    const base = await start({ createMessage: async () => JSON.stringify(insight) });
+    const res = await Promise.race([
+      post(base, {
+        player1: { name: "a", analysis: {} },
+        player2: { name: "b", analysis: {} },
+      }),
+      new Promise<Response>((_, reject) =>
+        setTimeout(() => reject(new Error("request hung: no response")), 5000)
+      ),
+    ]);
+    expect(res.status).toBe(400);
+    const payload = (await res.json()) as { error: string };
+    expect(payload.error).toMatch(/malformed/i);
+  });
+
   it("200 with the parsed insight on the happy path", async () => {
     const base = await start({ createMessage: async () => JSON.stringify(insight) });
     const res = await post(base, validBody());

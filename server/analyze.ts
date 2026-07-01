@@ -44,13 +44,61 @@ export interface PlayStyleInsight {
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: string };
 
+/**
+ * Deep shape check for a single player's analysis. Truthiness alone is not
+ * enough: an empty object passes a truthy test but then explodes in buildPrompt
+ * when it dereferences openingsAsWhite.slice(...) on undefined. We confirm the
+ * fields buildPrompt actually reads are the right runtime types so a
+ * malformed-but-present body is rejected with a 400 instead of throwing.
+ */
+function isPlayerGameAnalysis(a: unknown): a is PlayerGameAnalysis {
+  if (typeof a !== "object" || a === null) return false;
+  const o = a as Record<string, unknown>;
+  return (
+    Array.isArray(o.openingsAsWhite) &&
+    Array.isArray(o.openingsAsBlack) &&
+    Array.isArray(o.gameLengthBuckets) &&
+    typeof o.winRate === "number" &&
+    typeof o.totalGames === "number" &&
+    typeof o.wins === "number" &&
+    typeof o.losses === "number" &&
+    typeof o.draws === "number" &&
+    typeof o.avgMoveCount === "number" &&
+    typeof o.timeClassBreakdown === "object" &&
+    o.timeClassBreakdown !== null
+  );
+}
+
+/** True when a player ref carries an analysis field at all (present, non-null). */
+function hasAnalysisField(ref: unknown): ref is { name?: unknown; analysis: unknown } {
+  return (
+    typeof ref === "object" &&
+    ref !== null &&
+    "analysis" in ref &&
+    (ref as { analysis?: unknown }).analysis != null
+  );
+}
+
 /** Validate the POST body shape before we spend a Claude call on it. */
 export function validateAnalyzeBody(body: unknown): Result<AnalyzeBody> {
-  const b = body as Partial<AnalyzeBody> | null | undefined;
-  if (!b?.player1?.analysis || !b?.player2?.analysis) {
+  if (typeof body !== "object" || body === null) {
     return { ok: false, error: "Missing player analysis data" };
   }
-  return { ok: true, value: b as AnalyzeBody };
+  const b = body as { player1?: unknown; player2?: unknown };
+  // Missing entirely vs. present-but-malformed get distinct messages so the
+  // client can tell "you forgot the data" from "the data is the wrong shape".
+  if (!hasAnalysisField(b.player1) || !hasAnalysisField(b.player2)) {
+    return { ok: false, error: "Missing player analysis data" };
+  }
+  if (
+    typeof b.player1.name !== "string" ||
+    typeof b.player2.name !== "string" ||
+    !isPlayerGameAnalysis(b.player1.analysis) ||
+    !isPlayerGameAnalysis(b.player2.analysis)
+  ) {
+    return { ok: false, error: "Malformed player analysis data" };
+  }
+  return { ok: true, value: body as AnalyzeBody };
 }
 
 function summarizeForPrompt(name: string, analysis: PlayerGameAnalysis): string {
@@ -109,8 +157,8 @@ Focus on: opening preferences, tactical vs positional tendencies, game length pa
  *
  * The model is asked for JSON-only, but may still wrap it in prose or a code
  * fence, so we pull the first {...} block. We then confirm every expected field
- * is a non-empty string BEFORE returning it — a missing `gamePlan` used to flow
- * straight through to the UI as `undefined` and crash `.split()` in the client.
+ * is a non-empty string BEFORE returning it — a missing gamePlan used to flow
+ * straight through to the UI as undefined and crash .split() in the client.
  */
 export function extractAnalysisJson(text: string): Result<PlayStyleInsight> {
   const jsonMatch = text.match(/\{[\s\S]*\}/);
