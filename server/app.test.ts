@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createApp, type AppDeps } from "./app";
-import { createRateLimiter } from "./rateLimit";
+import { createRateLimiter, type RateLimiter } from "./rateLimit";
 import type { Logger } from "./logger";
 import type { PlayerGameAnalysis } from "./analyze";
 
@@ -132,6 +132,28 @@ describe("POST /api/analyze", () => {
     expect(res.status).toBe(500);
     const payload = (await res.json()) as { error: string };
     expect(payload.error).toContain("upstream boom");
+  });
+
+  it("routes an unexpected middleware throw to a generic 500 without leaking detail", async () => {
+    // A synchronous throw from any middleware must reach the global error
+    // handler and surface as a generic JSON 500 — never the raw message.
+    const secret = "internal detail that must not leak";
+    const throwingLimiter: RateLimiter = {
+      middleware: () => {
+        throw new Error(secret);
+      },
+      sweep: () => 0,
+      size: 0,
+    };
+    const base = await start({
+      createMessage: async () => JSON.stringify(insight),
+      rateLimiter: throwingLimiter,
+    });
+    const res = await post(base, validBody());
+    expect(res.status).toBe(500);
+    const payload = (await res.json()) as { error: string };
+    expect(payload.error).toBe("Internal error. Please retry.");
+    expect(payload.error).not.toContain(secret);
   });
 
   it("429 once the per-IP rate limit is exceeded", async () => {

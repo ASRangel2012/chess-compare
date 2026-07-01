@@ -27,6 +27,24 @@ export interface AppDeps {
   corsOptions?: cors.CorsOptions;
 }
 
+/**
+ * Wrap an async route handler so a thrown error or rejected promise is routed
+ * to Express's error-handling middleware. Express 4 does not do this itself: an
+ * unhandled rejection in an async handler otherwise leaves the request hanging
+ * with no response.
+ */
+function asyncHandler(
+  fn: (
+    req: express.Request,
+    res: express.Response,
+    next: express.NextFunction
+  ) => Promise<unknown>
+): express.RequestHandler {
+  return (req, res, next) => {
+    fn(req, res, next).catch(next);
+  };
+}
+
 export function createApp(deps: AppDeps): express.Express {
   const app = express();
   // Behind a reverse proxy, trust the first hop so req.ip is the real client
@@ -69,7 +87,10 @@ export function createApp(deps: AppDeps): express.Express {
   app.use(cors(deps.corsOptions));
   app.use(express.json({ limit: "1mb" }));
 
-  app.post("/api/analyze", deps.rateLimiter.middleware, async (req, res) => {
+  app.post(
+    "/api/analyze",
+    deps.rateLimiter.middleware,
+    asyncHandler(async (req, res) => {
     const log = deps.logger.child({
       requestId: res.locals.requestId,
       route: "analyze",
@@ -110,7 +131,8 @@ export function createApp(deps: AppDeps): express.Express {
     }
 
     res.json(parsed.value);
-  });
+    })
+  );
 
   app.get("/api/health", (_req, res) => {
     res.json({ ok: true, hasApiKey: Boolean(deps.createMessage) });
@@ -122,6 +144,20 @@ export function createApp(deps: AppDeps): express.Express {
       res.sendFile(path.join(deps.distPath, "index.html"));
     });
   }
+
+  // Last middleware: convert any error forwarded via next(err) — including async
+  // handler rejections — into a generic JSON 500. Full detail is logged with the
+  // request id; nothing internal is leaked to the client.
+  const errorHandler: express.ErrorRequestHandler = (err, _req, res, _next) => {
+    deps.logger.error("unhandled error", {
+      err: serializeError(err),
+      requestId: res.locals.requestId,
+    });
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Internal error. Please retry." });
+    }
+  };
+  app.use(errorHandler);
 
   return app;
 }

@@ -4,7 +4,7 @@ import { fileURLToPath } from "url";
 import Anthropic from "@anthropic-ai/sdk";
 import { createApp } from "./app";
 import { createRateLimiter } from "./rateLimit";
-import { logger } from "./logger";
+import { logger, serializeError } from "./logger";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -98,7 +98,7 @@ const app = createApp({
   corsOptions,
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   logger.info("server started", {
     port: Number(PORT),
     mode: isProduction ? "production" : "api-only",
@@ -106,4 +106,42 @@ app.listen(PORT, () => {
     model: MODEL,
   });
 });
+
+// Graceful shutdown: stop accepting new connections, let in-flight requests
+// finish, then exit. A forced exit backstops a close() that hangs.
+let shuttingDown = false;
+function gracefulShutdown(signal: string, code = 0): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  logger.info("shutting down", { signal });
+  const forced = setTimeout(() => {
+    logger.warn("forced shutdown: server.close timed out");
+    process.exit(code || 1);
+  }, 10_000);
+  forced.unref();
+  server.close((err) => {
+    if (err) {
+      logger.error("error during server.close", { err: serializeError(err) });
+      process.exit(1);
+      return;
+    }
+    logger.info("shutdown complete");
+    process.exit(code);
+  });
+}
+
+// Process-level safety nets. A rejected promise we never caught is logged but
+// not fatal; a truly uncaught exception leaves the process in an undefined
+// state, so we log it and shut down so the orchestrator can restart cleanly.
+process.on("unhandledRejection", (reason) => {
+  logger.error("unhandledRejection", { err: serializeError(reason) });
+});
+process.on("uncaughtException", (err) => {
+  logger.error("uncaughtException", { err: serializeError(err) });
+  gracefulShutdown("uncaughtException", 1);
+});
+
+for (const signal of ["SIGTERM", "SIGINT"] as const) {
+  process.on(signal, () => gracefulShutdown(signal));
+}
 
