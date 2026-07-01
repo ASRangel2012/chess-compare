@@ -29,6 +29,7 @@ const ANALYSIS_TOOL_NAME = "emit_play_style_analysis";
 
 const createMessage = anthropic
   ? async (prompt: string): Promise<string> => {
+      const startedAt = Date.now();
       const message = await anthropic.messages.create(
         {
         model: MODEL,
@@ -69,6 +70,16 @@ const createMessage = anthropic
         // Bound the upstream call: a hung/slow model must not tie up the request.
         { timeout: 30_000 }
       );
+
+      // Observability for an AI proxy: token cost and upstream latency are the
+      // first incident questions. Never log the raw model output.
+      logger.info("anthropic message", {
+        ms: Date.now() - startedAt,
+        inputTokens: message.usage.input_tokens,
+        outputTokens: message.usage.output_tokens,
+        stopReason: message.stop_reason,
+        model: MODEL,
+      });
 
       if (message.stop_reason === "max_tokens") {
         throw new Error(
