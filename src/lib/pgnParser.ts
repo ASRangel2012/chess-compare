@@ -53,6 +53,9 @@ export function deriveTimeClass(game: ChessGame): string {
   const inc = Number(incStr ?? 0);
   if (!Number.isFinite(base)) return "unknown";
   if (base >= 86400) return "daily";
+  // Weight the increment by ~40 (a rough assumed game length in moves) so an
+  // increment-heavy control lands in the right bucket; base seconds alone would
+  // under-count it. e.g. 180+2 -> 180 + 80 = 260s -> blitz.
   const estimated = base + inc * 40;
   if (estimated < 180) return "bullet";
   if (estimated < 600) return "blitz";

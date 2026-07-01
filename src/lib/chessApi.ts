@@ -14,6 +14,8 @@ const REQUEST_TIMEOUT_MS = 15_000;
 const ARCHIVE_CONCURRENCY = 6;
 /** Retry attempts when Chess.com rate-limits us (HTTP 429). */
 const MAX_RATE_LIMIT_RETRIES = 3;
+/** How many monthly archives the head-to-head scan looks back over. */
+export const HEAD_TO_HEAD_MAX_ARCHIVES = 48;
 
 interface FetchOptions {
   /**
@@ -260,7 +262,7 @@ export async function fetchHeadToHeadGames(
   username1: string,
   username2: string,
   maxGames = 100,
-  maxArchives = 48
+  maxArchives = HEAD_TO_HEAD_MAX_ARCHIVES
 ): Promise<ChessGame[]> {
   const u1 = username1.toLowerCase();
   const u2 = username2.toLowerCase();
