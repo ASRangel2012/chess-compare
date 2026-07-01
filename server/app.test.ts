@@ -170,6 +170,17 @@ describe("POST /api/analyze", () => {
   });
 });
 
+describe("unknown /api routes", () => {
+  it("returns a JSON 404 (not SPA HTML) for an unmatched /api route", async () => {
+    const base = await start({ createMessage: null });
+    const res = await fetch(`${base}/api/nope`);
+    expect(res.status).toBe(404);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBeTruthy();
+  });
+});
+
 describe("GET /api/health", () => {
   it("reports hasApiKey=false without a key", async () => {
     const base = await start({ createMessage: null });

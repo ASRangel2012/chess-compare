@@ -162,6 +162,12 @@ export function createApp(deps: AppDeps): express.Express {
     res.json({ ok: true, hasApiKey: Boolean(deps.createMessage) });
   });
 
+  // Any unmatched /api/* route is a JSON 404 — it must never fall through to the
+  // SPA fallback below, which would return index.html with a misleading 200.
+  app.all("/api/*", (_req, res) => {
+    res.status(404).json({ error: "Not found" });
+  });
+
   if (deps.isProduction) {
     app.use(express.static(deps.distPath));
     app.get("*", (_req, res) => {
