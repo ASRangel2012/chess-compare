@@ -5,6 +5,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { createApp } from "./app";
 import { createRateLimiter } from "./rateLimit";
 import { logger, serializeError } from "./logger";
+import { resolveCorsOptions } from "./corsConfig";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -79,11 +80,8 @@ const createMessage = anthropic
     }
   : null;
 
-const corsOrigin = process.env.CORS_ORIGIN?.split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
-const corsOptions =
-  corsOrigin && corsOrigin.length > 0 ? { origin: corsOrigin } : undefined;
+// Fail closed in production: refuse to start without an explicit CORS allow-list.
+const corsOptions = resolveCorsOptions(process.env.CORS_ORIGIN, isProduction);
 
 const rateLimiter = createRateLimiter({ windowMs: 60_000, max: 10 });
 
