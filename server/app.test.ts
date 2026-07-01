@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createApp, type AppDeps } from "./app";
-import { createRateLimiter } from "./rateLimit";
+import { createRateLimiter, type RateLimiter } from "./rateLimit";
 import type { Logger } from "./logger";
 import type { PlayerGameAnalysis } from "./analyze";
 
@@ -26,12 +26,14 @@ const insight = {
 
 function analysis(): PlayerGameAnalysis {
   return {
+    username: "player",
     totalGames: 10,
     wins: 5,
     losses: 3,
     draws: 2,
     winRate: 50,
     avgMoveCount: 35,
+    commonOpenings: [],
     openingsAsWhite: [],
     openingsAsBlack: [],
     gameLengthBuckets: [],
@@ -54,6 +56,7 @@ async function start(overrides: Partial<AppDeps>): Promise<string> {
     rateLimiter: createRateLimiter({ windowMs: 60_000, max: 10 }),
     logger: noopLogger,
     isProduction: false,
+    trustProxy: false,
     distPath: "/tmp",
     ...overrides,
   });
@@ -91,6 +94,24 @@ describe("POST /api/analyze", () => {
     expect(res.status).toBe(400);
   });
 
+  it("rejects a present-but-malformed analysis body with 400 without hanging", async () => {
+    // Regression: an empty `analysis` object used to pass validation, then throw
+    // in buildPrompt outside any try/catch, leaving the request to hang forever.
+    const base = await start({ createMessage: async () => JSON.stringify(insight) });
+    const res = await Promise.race([
+      post(base, {
+        player1: { name: "a", analysis: {} },
+        player2: { name: "b", analysis: {} },
+      }),
+      new Promise<Response>((_, reject) =>
+        setTimeout(() => reject(new Error("request hung: no response")), 5000)
+      ),
+    ]);
+    expect(res.status).toBe(400);
+    const payload = (await res.json()) as { error: string };
+    expect(payload.error).toMatch(/malformed/i);
+  });
+
   it("200 with the parsed insight on the happy path", async () => {
     const base = await start({ createMessage: async () => JSON.stringify(insight) });
     const res = await post(base, validBody());
@@ -113,7 +134,30 @@ describe("POST /api/analyze", () => {
     const res = await post(base, validBody());
     expect(res.status).toBe(500);
     const payload = (await res.json()) as { error: string };
-    expect(payload.error).toContain("upstream boom");
+    expect(payload.error).toBe("Analysis request failed. Please retry.");
+    expect(payload.error).not.toContain("upstream boom");
+  });
+
+  it("routes an unexpected middleware throw to a generic 500 without leaking detail", async () => {
+    // A synchronous throw from any middleware must reach the global error
+    // handler and surface as a generic JSON 500 — never the raw message.
+    const secret = "internal detail that must not leak";
+    const throwingLimiter: RateLimiter = {
+      middleware: () => {
+        throw new Error(secret);
+      },
+      sweep: () => 0,
+      size: 0,
+    };
+    const base = await start({
+      createMessage: async () => JSON.stringify(insight),
+      rateLimiter: throwingLimiter,
+    });
+    const res = await post(base, validBody());
+    expect(res.status).toBe(500);
+    const payload = (await res.json()) as { error: string };
+    expect(payload.error).toBe("Internal error. Please retry.");
+    expect(payload.error).not.toContain(secret);
   });
 
   it("429 once the per-IP rate limit is exceeded", async () => {
@@ -125,6 +169,17 @@ describe("POST /api/analyze", () => {
     const blocked = await post(base, validBody());
     expect(blocked.status).toBe(429);
     expect(blocked.headers.get("Retry-After")).toBeTruthy();
+  });
+});
+
+describe("unknown /api routes", () => {
+  it("returns a JSON 404 (not SPA HTML) for an unmatched /api route", async () => {
+    const base = await start({ createMessage: null });
+    const res = await fetch(`${base}/api/nope`);
+    expect(res.status).toBe(404);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBeTruthy();
   });
 });
 
@@ -155,10 +210,23 @@ describe("middleware", () => {
     expect(echoed.headers.get("x-request-id")).toBe("abc-123");
   });
 
+  it("caps a reflected inbound X-Request-Id at 128 chars", async () => {
+    const base = await start({ createMessage: null });
+    const res = await fetch(`${base}/api/health`, {
+      headers: { "X-Request-Id": "z".repeat(500) },
+    });
+    expect(res.headers.get("x-request-id")).toBe("z".repeat(128));
+  });
+
   it("sets baseline security headers", async () => {
     const base = await start({ createMessage: null });
     const res = await fetch(`${base}/api/health`);
     expect(res.headers.get("x-content-type-options")).toBe("nosniff");
     expect(res.headers.get("x-frame-options")).toBe("DENY");
+    const csp = res.headers.get("content-security-policy");
+    expect(csp).toContain("default-src 'self'");
+    expect(csp).toContain("https://api.chess.com");
+    expect(csp).toContain("https://*.chesscomfiles.com");
+    expect(res.headers.get("strict-transport-security")).toContain("max-age=");
   });
 });

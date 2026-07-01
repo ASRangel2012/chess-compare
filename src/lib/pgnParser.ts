@@ -1,4 +1,6 @@
 import type { ChessGame, ParsedGame, PlayerGameAnalysis, OpeningStats } from "./types";
+import { parsePgnMoves } from "./chess";
+import { logger } from "./logger";
 
 export function parsePgnHeader(pgn: string, tag: string): string | undefined {
   const match = pgn.match(new RegExp(`\\[${tag}\\s+"([^"]*)"\\]`));
@@ -14,7 +16,10 @@ export function parsePgnHeader(pgn: string, tag: string): string | undefined {
 export function openingNameFromUrl(url: string | undefined): string | undefined {
   if (!url) return undefined;
   const slug = url.split("/").filter(Boolean).pop();
-  if (!slug || !slug.includes("-")) return undefined;
+  if (!slug) return undefined;
+  // Reject bare ECO codes (e.g. "C50", "B20") — they are not opening names. A
+  // single-word slug like "Reti" is a real name, so don't require a hyphen.
+  if (/^[A-E]\d{2}$/i.test(slug)) return undefined;
   const name = decodeURIComponent(slug)
     .replace(/-/g, " ")
     .replace(/\s+/g, " ")
@@ -48,32 +53,55 @@ export function deriveTimeClass(game: ChessGame): string {
   const inc = Number(incStr ?? 0);
   if (!Number.isFinite(base)) return "unknown";
   if (base >= 86400) return "daily";
+  // Weight the increment by ~40 (a rough assumed game length in moves) so an
+  // increment-heavy control lands in the right bucket; base seconds alone would
+  // under-count it. e.g. 180+2 -> 180 + 80 = 260s -> blitz.
   const estimated = base + inc * 40;
   if (estimated < 180) return "bullet";
   if (estimated < 600) return "blitz";
   return "rapid";
 }
 
-export function normalizeResult(
-  result: string
-): "win" | "loss" | "draw" {
+const DRAW_RESULTS = new Set([
+  "draw",
+  "agreed",
+  "repetition",
+  "stalemate",
+  "insufficient",
+  "50move",
+  "timevsinsufficient",
+]);
+const LOSS_RESULTS = new Set([
+  "checkmated",
+  "resigned",
+  "timeout",
+  "abandoned",
+  "lose",
+]);
+
+export function normalizeResult(result: string): "win" | "loss" | "draw" {
   if (result === "win") return "win";
-  if (result === "draw" || result === "agreed" || result === "repetition" || result === "stalemate" || result === "insufficient" || result === "50move" || result === "timevsinsufficient") {
-    return "draw";
+  if (DRAW_RESULTS.has(result)) return "draw";
+  if (!LOSS_RESULTS.has(result)) {
+    // Unknown code: still treat as a loss (safe default) but leave a breadcrumb
+    // so a new Chess.com result string doesn't silently skew win rates.
+    logger.debug("normalizeResult: unrecognized result code, treating as loss", {
+      result,
+    });
   }
   return "loss";
 }
 
 /**
- * Count the moves in a game's PGN movetext. Note this counts *full moves* (each
- * "N." move-number token, i.e. one per White move) rather than plies. That's
- * consistent across every game, so averages and length buckets stay
- * apples-to-apples. Exported so the head-to-head module shares one definition.
+ * Count *full moves* (one per White move) in a game's PGN movetext. Delegates to
+ * the shared SAN tokenizer so it's robust to whitespace (e.g. "1.e4" with no
+ * space after the dot) instead of the old move-number regex, which silently
+ * returned 0 for tightly-formatted PGNs. Full moves = ceil(plies / 2), which
+ * preserves the historical count so averages and length buckets are unchanged.
+ * Exported so the head-to-head module shares one definition.
  */
 export function countMoves(pgn: string): number {
-  const moveSection = pgn.split("\n\n").slice(1).join("\n\n");
-  const moves = moveSection.match(/\d+\.\s+\S+/g);
-  return moves?.length ?? 0;
+  return Math.ceil(parsePgnMoves(pgn).length / 2);
 }
 
 export function parseGame(

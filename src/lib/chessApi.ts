@@ -14,6 +14,8 @@ const REQUEST_TIMEOUT_MS = 15_000;
 const ARCHIVE_CONCURRENCY = 6;
 /** Retry attempts when Chess.com rate-limits us (HTTP 429). */
 const MAX_RATE_LIMIT_RETRIES = 3;
+/** How many monthly archives the head-to-head scan looks back over. */
+export const HEAD_TO_HEAD_MAX_ARCHIVES = 48;
 
 interface FetchOptions {
   /**
@@ -29,8 +31,38 @@ interface FetchOptions {
  * In-memory response cache keyed by URL. We store the in-flight Promise (not
  * just the resolved value) so concurrent callers for the same URL share a
  * single network request. Failed requests are evicted so errors aren't sticky.
+ *
+ * Bounded with simple LRU eviction so a long session comparing many players
+ * can't grow the map without limit. Map preserves insertion order, so the first
+ * key is the least-recently-used; a cache hit refreshes recency by reinserting.
  */
+export const JSON_CACHE_MAX = 500;
 const jsonCache = new Map<string, Promise<unknown>>();
+
+/** Current number of cached entries. Exposed for tests. */
+export function jsonCacheSize(): number {
+  return jsonCache.size;
+}
+
+function cacheGet(url: string): Promise<unknown> | undefined {
+  const cached = jsonCache.get(url);
+  if (cached !== undefined) {
+    // Move to most-recently-used (delete + re-set puts it at the tail).
+    jsonCache.delete(url);
+    jsonCache.set(url, cached);
+  }
+  return cached;
+}
+
+function cacheSet(url: string, promise: Promise<unknown>): void {
+  jsonCache.set(url, promise);
+  if (jsonCache.size <= JSON_CACHE_MAX) return;
+  // Evict least-recently-used entries (oldest insertion order) until in bounds.
+  for (const lru of jsonCache.keys()) {
+    jsonCache.delete(lru);
+    if (jsonCache.size <= JSON_CACHE_MAX) break;
+  }
+}
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -74,11 +106,11 @@ async function requestJson<T>(url: string): Promise<T> {
 async function fetchJson<T>(url: string, opts: FetchOptions = {}): Promise<T> {
   if (!opts.cache) return requestJson<T>(url);
 
-  const cached = jsonCache.get(url);
+  const cached = cacheGet(url);
   if (cached) return cached as Promise<T>;
 
   const promise = requestJson<T>(url);
-  jsonCache.set(url, promise);
+  cacheSet(url, promise);
   // Don't cache failures — let the next call retry.
   promise.catch(() => jsonCache.delete(url));
   return promise;
@@ -230,7 +262,7 @@ export async function fetchHeadToHeadGames(
   username1: string,
   username2: string,
   maxGames = 100,
-  maxArchives = 48
+  maxArchives = HEAD_TO_HEAD_MAX_ARCHIVES
 ): Promise<ChessGame[]> {
   const u1 = username1.toLowerCase();
   const u2 = username2.toLowerCase();

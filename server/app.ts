@@ -21,22 +21,49 @@ export interface AppDeps {
   rateLimiter: RateLimiter;
   logger: Logger;
   isProduction: boolean;
+  /**
+   * Express `trust proxy` setting. Must match the real deployment topology, or
+   * clients can spoof X-Forwarded-For and bypass the per-IP rate limiter.
+   */
+  trustProxy: boolean | number | string;
   /** Absolute path to the built SPA (served in production). */
   distPath: string;
   /** Restrict CORS to specific origins; omit to allow any (fine for local dev). */
   corsOptions?: cors.CorsOptions;
 }
 
+/**
+ * Wrap an async route handler so a thrown error or rejected promise is routed
+ * to Express's error-handling middleware. Express 4 does not do this itself: an
+ * unhandled rejection in an async handler otherwise leaves the request hanging
+ * with no response.
+ */
+function asyncHandler(
+  fn: (
+    req: express.Request,
+    res: express.Response,
+    next: express.NextFunction
+  ) => Promise<unknown>
+): express.RequestHandler {
+  return (req, res, next) => {
+    fn(req, res, next).catch(next);
+  };
+}
+
 export function createApp(deps: AppDeps): express.Express {
   const app = express();
-  // Behind a reverse proxy, trust the first hop so req.ip is the real client
-  // (the rate limiter keys on it).
-  app.set("trust proxy", 1);
+  // Trust proxy must match the real topology (see AppDeps.trustProxy). Default
+  // false for direct exposure so a client can't spoof X-Forwarded-For to bypass
+  // the per-IP rate limiter.
+  app.set("trust proxy", deps.trustProxy);
 
   // Attach a request id (honoring an inbound X-Request-Id) for correlating logs.
   app.use((req, res, next) => {
     const inbound = req.headers["x-request-id"];
-    const id = (typeof inbound === "string" && inbound) || randomUUID();
+    // Cap a reflected inbound id so a client can't bloat every log line with it.
+    const id =
+      (typeof inbound === "string" && inbound && inbound.slice(0, 128)) ||
+      randomUUID();
     res.locals.requestId = id;
     res.setHeader("X-Request-Id", id);
     next();
@@ -58,18 +85,37 @@ export function createApp(deps: AppDeps): express.Express {
     next();
   });
 
-  // Minimal security headers (a dependency-free subset of what helmet sets).
+  // Security headers (a dependency-free subset of what helmet sets). The CSP
+  // allows the app's own origin plus the Chess.com origins it legitimately uses:
+  // avatars on *.chesscomfiles.com and the public API on api.chess.com.
+  const contentSecurityPolicy = [
+    "default-src 'self'",
+    "img-src 'self' https://*.chesscomfiles.com data:",
+    "connect-src 'self' https://api.chess.com",
+    "style-src 'self' 'unsafe-inline'",
+    "object-src 'none'",
+    "frame-ancestors 'none'",
+    "base-uri 'self'",
+  ].join("; ");
   app.use((_req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("X-Frame-Options", "DENY");
     res.setHeader("Referrer-Policy", "no-referrer");
+    res.setHeader("Content-Security-Policy", contentSecurityPolicy);
+    res.setHeader(
+      "Strict-Transport-Security",
+      "max-age=63072000; includeSubDomains"
+    );
     next();
   });
 
   app.use(cors(deps.corsOptions));
   app.use(express.json({ limit: "1mb" }));
 
-  app.post("/api/analyze", deps.rateLimiter.middleware, async (req, res) => {
+  app.post(
+    "/api/analyze",
+    deps.rateLimiter.middleware,
+    asyncHandler(async (req, res) => {
     const log = deps.logger.child({
       requestId: res.locals.requestId,
       route: "analyze",
@@ -93,9 +139,11 @@ export function createApp(deps: AppDeps): express.Express {
     try {
       text = await deps.createMessage(prompt);
     } catch (err) {
+      // Log the detail, return a generic message (mirrors the 502 parse path):
+      // SDK/network errors can carry internal detail we must not leak.
       log.error("model request failed", { err: serializeError(err) });
       return res.status(500).json({
-        error: err instanceof Error ? err.message : "Analysis request failed",
+        error: "Analysis request failed. Please retry.",
       });
     }
 
@@ -110,10 +158,17 @@ export function createApp(deps: AppDeps): express.Express {
     }
 
     res.json(parsed.value);
-  });
+    })
+  );
 
   app.get("/api/health", (_req, res) => {
     res.json({ ok: true, hasApiKey: Boolean(deps.createMessage) });
+  });
+
+  // Any unmatched /api/* route is a JSON 404 — it must never fall through to the
+  // SPA fallback below, which would return index.html with a misleading 200.
+  app.all("/api/*", (_req, res) => {
+    res.status(404).json({ error: "Not found" });
   });
 
   if (deps.isProduction) {
@@ -122,6 +177,20 @@ export function createApp(deps: AppDeps): express.Express {
       res.sendFile(path.join(deps.distPath, "index.html"));
     });
   }
+
+  // Last middleware: convert any error forwarded via next(err) — including async
+  // handler rejections — into a generic JSON 500. Full detail is logged with the
+  // request id; nothing internal is leaked to the client.
+  const errorHandler: express.ErrorRequestHandler = (err, _req, res, _next) => {
+    deps.logger.error("unhandled error", {
+      err: serializeError(err),
+      requestId: res.locals.requestId,
+    });
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Internal error. Please retry." });
+    }
+  };
+  app.use(errorHandler);
 
   return app;
 }

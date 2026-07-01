@@ -4,7 +4,9 @@ import { fileURLToPath } from "url";
 import Anthropic from "@anthropic-ai/sdk";
 import { createApp } from "./app";
 import { createRateLimiter } from "./rateLimit";
-import { logger } from "./logger";
+import { logger, serializeError } from "./logger";
+import { resolveCorsOptions } from "./corsConfig";
+import { parseTrustProxy } from "./trustProxy";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -27,7 +29,9 @@ const ANALYSIS_TOOL_NAME = "emit_play_style_analysis";
 
 const createMessage = anthropic
   ? async (prompt: string): Promise<string> => {
-      const message = await anthropic.messages.create({
+      const startedAt = Date.now();
+      const message = await anthropic.messages.create(
+        {
         model: MODEL,
         max_tokens: MAX_TOKENS,
         tools: [
@@ -62,6 +66,19 @@ const createMessage = anthropic
         ],
         tool_choice: { type: "tool", name: ANALYSIS_TOOL_NAME },
         messages: [{ role: "user", content: prompt }],
+        },
+        // Bound the upstream call: a hung/slow model must not tie up the request.
+        { timeout: 30_000 }
+      );
+
+      // Observability for an AI proxy: token cost and upstream latency are the
+      // first incident questions. Never log the raw model output.
+      logger.info("anthropic message", {
+        ms: Date.now() - startedAt,
+        inputTokens: message.usage.input_tokens,
+        outputTokens: message.usage.output_tokens,
+        stopReason: message.stop_reason,
+        model: MODEL,
       });
 
       if (message.stop_reason === "max_tokens") {
@@ -79,11 +96,10 @@ const createMessage = anthropic
     }
   : null;
 
-const corsOrigin = process.env.CORS_ORIGIN?.split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
-const corsOptions =
-  corsOrigin && corsOrigin.length > 0 ? { origin: corsOrigin } : undefined;
+// Fail closed in production: refuse to start without an explicit CORS allow-list.
+const corsOptions = resolveCorsOptions(process.env.CORS_ORIGIN, isProduction);
+// Default false (direct exposure) so X-Forwarded-For cannot be spoofed.
+const trustProxy = parseTrustProxy(process.env.TRUST_PROXY);
 
 const rateLimiter = createRateLimiter({ windowMs: 60_000, max: 10 });
 
@@ -94,11 +110,12 @@ const app = createApp({
   rateLimiter,
   logger,
   isProduction,
+  trustProxy,
   distPath: path.join(__dirname, "../dist"),
   corsOptions,
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   logger.info("server started", {
     port: Number(PORT),
     mode: isProduction ? "production" : "api-only",
@@ -106,4 +123,42 @@ app.listen(PORT, () => {
     model: MODEL,
   });
 });
+
+// Graceful shutdown: stop accepting new connections, let in-flight requests
+// finish, then exit. A forced exit backstops a close() that hangs.
+let shuttingDown = false;
+function gracefulShutdown(signal: string, code = 0): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  logger.info("shutting down", { signal });
+  const forced = setTimeout(() => {
+    logger.warn("forced shutdown: server.close timed out");
+    process.exit(code || 1);
+  }, 10_000);
+  forced.unref();
+  server.close((err) => {
+    if (err) {
+      logger.error("error during server.close", { err: serializeError(err) });
+      process.exit(1);
+      return;
+    }
+    logger.info("shutdown complete");
+    process.exit(code);
+  });
+}
+
+// Process-level safety nets. A rejected promise we never caught is logged but
+// not fatal; a truly uncaught exception leaves the process in an undefined
+// state, so we log it and shut down so the orchestrator can restart cleanly.
+process.on("unhandledRejection", (reason) => {
+  logger.error("unhandledRejection", { err: serializeError(reason) });
+});
+process.on("uncaughtException", (err) => {
+  logger.error("uncaughtException", { err: serializeError(err) });
+  gracefulShutdown("uncaughtException", 1);
+});
+
+for (const signal of ["SIGTERM", "SIGINT"] as const) {
+  process.on(signal, () => gracefulShutdown(signal));
+}
 

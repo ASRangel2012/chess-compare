@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import {
   IconUser,
   IconChartBar,
@@ -18,7 +18,6 @@ import { OpeningAnalysis } from "./OpeningAnalysis";
 import { HeadToHeadHistory } from "./HeadToHeadHistory";
 import { PlayStyleAnalysis } from "./PlayStyleAnalysis";
 import { GamePlan } from "./GamePlan";
-import * as React from "react";
 
 export function ChessCompare() {
   const [player1, setPlayer1] = useState("");
@@ -36,7 +35,7 @@ export function ChessCompare() {
     }
   }, [theme]);
 
-  const handleSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+  const handleSubmit = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     compare(player1, player2);
   };

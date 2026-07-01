@@ -7,6 +7,8 @@ import {
   getRecordForTimeClass,
   fetchRecentGames,
   fetchArchives,
+  jsonCacheSize,
+  JSON_CACHE_MAX,
 } from "./chessApi";
 import type { ChessPlayerStats } from "./types";
 
@@ -181,5 +183,87 @@ describe("fetchRecentGames (network)", () => {
       String(c[0]).endsWith("/games/archives")
     ).length;
     expect(archiveCalls).toBe(1);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// Network resilience: the 429-backoff retry and the timeout/abort branches in
+// requestJson — the branches most likely to misbehave under real conditions.
+// ---------------------------------------------------------------------------
+
+describe("chessApi network resilience", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it("retries once on HTTP 429 then succeeds (honoring Retry-After)", async () => {
+    const payload = { archives: [`${BASE}/player/retryuser/games/2020/01`] };
+    let calls = 0;
+    const fetchMock = vi.fn(async () => {
+      calls++;
+      if (calls === 1) {
+        return {
+          ok: false,
+          status: 429,
+          headers: { get: (h: string) => (h === "Retry-After" ? "0" : null) },
+          json: async () => ({}),
+        } as unknown as Response;
+      }
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        json: async () => payload,
+      } as unknown as Response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchArchives("retryuser-429");
+    expect(result).toEqual(payload.archives);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("maps a timed-out (aborted) request to a friendly error", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(
+      (_url: string, opts: { signal: AbortSignal }) =>
+        new Promise<Response>((_resolve, reject) => {
+          opts.signal.addEventListener("abort", () =>
+            reject(new DOMException("aborted", "AbortError"))
+          );
+        })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const pending = fetchArchives("timeout-user");
+    const assertion = expect(pending).rejects.toThrow(/timed out/i);
+    // Fast-forward past the 15s per-request timeout so the AbortController fires.
+    await vi.advanceTimersByTimeAsync(20_000);
+    await assertion;
+  });
+});
+
+
+describe("jsonCache eviction (LRU cap)", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("bounds the cache to JSON_CACHE_MAX", async () => {
+    const fetchMock = vi.fn(
+      async (input: string | URL) =>
+        ({
+          ok: true,
+          status: 200,
+          headers: { get: () => null },
+          json: async () => ({ archives: [String(input)] }),
+        }) as unknown as Response
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    for (let i = 0; i < JSON_CACHE_MAX + 25; i++) {
+      await fetchArchives(`cap-user-${i}`);
+    }
+    expect(jsonCacheSize()).toBeLessThanOrEqual(JSON_CACHE_MAX);
+    expect(jsonCacheSize()).toBe(JSON_CACHE_MAX);
   });
 });

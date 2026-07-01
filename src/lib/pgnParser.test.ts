@@ -1,4 +1,5 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import { logger } from "./logger";
 import {
   parsePgnHeader,
   openingNameFromUrl,
@@ -64,9 +65,14 @@ describe("openingNameFromUrl", () => {
     ).toBe("Bishop's Opening");
   });
 
-  it("returns undefined for undefined or dash-less slugs", () => {
+  it("keeps single-word opening names and rejects only ECO-code slugs", () => {
     expect(openingNameFromUrl(undefined)).toBeUndefined();
-    expect(openingNameFromUrl("https://www.chess.com/openings/Sicilian")).toBeUndefined();
+    expect(openingNameFromUrl("https://www.chess.com/openings/Reti")).toBe("Reti");
+    expect(
+      openingNameFromUrl("https://www.chess.com/openings/Sicilian")
+    ).toBe("Sicilian");
+    expect(openingNameFromUrl("C50")).toBeUndefined();
+    expect(openingNameFromUrl("B20")).toBeUndefined();
   });
 });
 
@@ -136,6 +142,20 @@ describe("normalizeResult", () => {
     "50move",
     "timevsinsufficient",
   ])("maps %s to a draw", (r) => expect(normalizeResult(r)).toBe("draw"));
+
+  it("debug-logs an unrecognized code but still maps it to a loss", () => {
+    const spy = vi.spyOn(logger, "debug").mockImplementation(() => {});
+    expect(normalizeResult("teleported")).toBe("loss");
+    expect(spy).toHaveBeenCalledOnce();
+    spy.mockRestore();
+  });
+
+  it("does not debug-log a recognized loss code", () => {
+    const spy = vi.spyOn(logger, "debug").mockImplementation(() => {});
+    expect(normalizeResult("resigned")).toBe("loss");
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
 });
 
 describe("parseGame", () => {
@@ -162,6 +182,19 @@ describe("parseGame", () => {
 
   it("is case-insensitive on username", () => {
     expect(parseGame(makeGame(), "ALICE")!.color).toBe("white");
+  });
+
+  it("counts moves robustly regardless of whitespace after the move number", () => {
+    const spaced = parseGame(
+      makeGame({ pgn: '[White "alice"]\n[Black "bob"]\n\n1. e4 e5 2. Nf3 Nc6 1-0' }),
+      "alice"
+    );
+    const tight = parseGame(
+      makeGame({ pgn: '[White "alice"]\n[Black "bob"]\n\n1.e4 e5 2.Nf3 Nc6 1-0' }),
+      "alice"
+    );
+    expect(spaced!.moveCount).toBe(2);
+    expect(tight!.moveCount).toBe(2); // old regex returned 0 here
   });
 
   it("reads accuracy when present", () => {

@@ -1,9 +1,10 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { fetchHeadToHeadGames, normalizeUsername } from "../lib/chessApi";
 import { analyzeHeadToHead } from "../lib/headToHead";
 import { fetchPlayStyleAnalysis } from "../lib/analyzeApi";
 import { runComparison, validateUsernames, MAX_GAMES } from "../lib/compare";
 import { logger } from "../lib/logger";
+import { loadProgressive } from "./progressiveLoad";
 import type {
   ChessPlayerProfile,
   ChessPlayerStats,
@@ -47,6 +48,10 @@ export function useChessCompare() {
   const [analyzingStyle, setAnalyzingStyle] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<CompareResult | null>(null);
+  // Monotonic run counter: each compare() stamps a run so a late-resolving H2H
+  // or AI promise from a superseded run can be ignored instead of merging stale
+  // data into a newer comparison.
+  const runIdRef = useRef(0);
 
   const compare = useCallback(
     async (username1: string, username2: string, withAi = true) => {
@@ -60,6 +65,7 @@ export function useChessCompare() {
         return;
       }
 
+      const myRun = ++runIdRef.current;
       setLoading(true);
       setError(null);
       setResult(null);
@@ -68,11 +74,16 @@ export function useChessCompare() {
       try {
         core = await runComparison(username1, username2, { maxGames: MAX_GAMES });
       } catch (err) {
-        logger.warn("comparison failed", err);
-        setError(err instanceof Error ? err.message : "Comparison failed");
-        setLoading(false);
+        if (runIdRef.current === myRun) {
+          logger.warn("comparison failed", err);
+          setError(err instanceof Error ? err.message : "Comparison failed");
+          setLoading(false);
+        }
         return;
       }
+
+      // A newer run started while we were fetching — abandon this one.
+      if (runIdRef.current !== myRun) return;
 
       const u1 = core.player1.username;
       const u2 = core.player2.username;
@@ -80,50 +91,36 @@ export function useChessCompare() {
       setResult({ ...core, headToHead: EMPTY_HEAD_TO_HEAD, insights: null });
       setLoading(false);
 
-      // Head-to-head is best-effort — a failed archive scan must not fail the
-      // main comparison, but it should still be visible to a developer.
-      setLoadingHeadToHead(true);
-      fetchHeadToHeadGames(u1, u2)
-        .then((h2hGames) => {
-          const headToHead = analyzeHeadToHead(h2hGames, u1, u2);
-          setResult((prev) => (prev ? { ...prev, headToHead } : prev));
-        })
-        .catch((h2hErr) => {
-          logger.warn("head-to-head scan failed; showing comparison without it", h2hErr);
-        })
-        .finally(() => setLoadingHeadToHead(false));
-
-      if (
-        withAi &&
-        core.player1.analysis.totalGames > 0 &&
-        core.player2.analysis.totalGames > 0
-      ) {
-        setAnalyzingStyle(true);
-        try {
-          const insights = await fetchPlayStyleAnalysis(
-            core.player1.analysis,
-            core.player2.analysis,
-            u1,
-            u2
-          );
-          setResult((prev) => (prev ? { ...prev, insights } : prev));
-        } catch (aiErr) {
-          logger.error("AI play style analysis failed", aiErr);
-          setError(
-            aiErr instanceof Error
-              ? `Stats loaded, but AI analysis failed: ${aiErr.message}`
-              : "AI analysis failed"
-          );
-        } finally {
-          setAnalyzingStyle(false);
+      await loadProgressive(
+        {
+          u1,
+          u2,
+          analysis1: core.player1.analysis,
+          analysis2: core.player2.analysis,
+          withAi,
+        },
+        { fetchHeadToHeadGames, analyzeHeadToHead, fetchPlayStyleAnalysis },
+        {
+          isCurrent: () => runIdRef.current === myRun,
+          applyHeadToHead: (headToHead) =>
+            setResult((prev) => (prev ? { ...prev, headToHead } : prev)),
+          setLoadingHeadToHead,
+          applyInsights: (insights) =>
+            setResult((prev) => (prev ? { ...prev, insights } : prev)),
+          setAnalyzingStyle,
+          reportAiError: (message) => setError(message),
+          logWarn: (message, detail) => logger.warn(message, detail),
+          logError: (message, detail) => logger.error(message, detail),
         }
-      }
+      );
     },
     []
   );
 
   const retryAiAnalysis = useCallback(async () => {
     if (!result) return;
+    // Tie the retry to the current run; a fresh compare() supersedes it.
+    const myRun = runIdRef.current;
     setAnalyzingStyle(true);
     setError(null);
     try {
@@ -133,12 +130,16 @@ export function useChessCompare() {
         result.player1.username,
         result.player2.username
       );
-      setResult((prev) => (prev ? { ...prev, insights } : prev));
+      if (runIdRef.current === myRun) {
+        setResult((prev) => (prev ? { ...prev, insights } : prev));
+      }
     } catch (err) {
-      logger.error("AI play style analysis retry failed", err);
-      setError(err instanceof Error ? err.message : "AI analysis failed");
+      if (runIdRef.current === myRun) {
+        logger.error("AI play style analysis retry failed", err);
+        setError(err instanceof Error ? err.message : "AI analysis failed");
+      }
     } finally {
-      setAnalyzingStyle(false);
+      if (runIdRef.current === myRun) setAnalyzingStyle(false);
     }
   }, [result]);
 

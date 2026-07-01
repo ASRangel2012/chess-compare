@@ -7,6 +7,7 @@ import {
 } from "@tabler/icons-react";
 import type { HeadToHeadSummary } from "../lib/types";
 import { GameViewer } from "./GameViewer";
+import { HEAD_TO_HEAD_MAX_ARCHIVES } from "../lib/chessApi";
 
 interface HeadToHeadHistoryProps {
   player1Name: string;
@@ -60,7 +61,7 @@ export function HeadToHeadHistory({
     return (
       <div className="card">
         <p className="empty-state">
-          No direct games found in the last 48 months of {player1Name}&apos;s
+          No direct games found in the last {HEAD_TO_HEAD_MAX_ARCHIVES} months of {player1Name}&apos;s
           archives. They may not have played on Chess.com recently, or games
           are outside the scanned window.
         </p>
