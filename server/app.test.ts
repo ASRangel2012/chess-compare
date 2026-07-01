@@ -202,5 +202,10 @@ describe("middleware", () => {
     const res = await fetch(`${base}/api/health`);
     expect(res.headers.get("x-content-type-options")).toBe("nosniff");
     expect(res.headers.get("x-frame-options")).toBe("DENY");
+    const csp = res.headers.get("content-security-policy");
+    expect(csp).toContain("default-src 'self'");
+    expect(csp).toContain("https://api.chess.com");
+    expect(csp).toContain("https://*.chesscomfiles.com");
+    expect(res.headers.get("strict-transport-security")).toContain("max-age=");
   });
 });

@@ -82,11 +82,27 @@ export function createApp(deps: AppDeps): express.Express {
     next();
   });
 
-  // Minimal security headers (a dependency-free subset of what helmet sets).
+  // Security headers (a dependency-free subset of what helmet sets). The CSP
+  // allows the app's own origin plus the Chess.com origins it legitimately uses:
+  // avatars on *.chesscomfiles.com and the public API on api.chess.com.
+  const contentSecurityPolicy = [
+    "default-src 'self'",
+    "img-src 'self' https://*.chesscomfiles.com data:",
+    "connect-src 'self' https://api.chess.com",
+    "style-src 'self' 'unsafe-inline'",
+    "object-src 'none'",
+    "frame-ancestors 'none'",
+    "base-uri 'self'",
+  ].join("; ");
   app.use((_req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
     res.setHeader("X-Frame-Options", "DENY");
     res.setHeader("Referrer-Policy", "no-referrer");
+    res.setHeader("Content-Security-Policy", contentSecurityPolicy);
+    res.setHeader(
+      "Strict-Transport-Security",
+      "max-age=63072000; includeSubDomains"
+    );
     next();
   });
 
