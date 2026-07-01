@@ -54,6 +54,7 @@ async function start(overrides: Partial<AppDeps>): Promise<string> {
     rateLimiter: createRateLimiter({ windowMs: 60_000, max: 10 }),
     logger: noopLogger,
     isProduction: false,
+    trustProxy: false,
     distPath: "/tmp",
     ...overrides,
   });

@@ -6,6 +6,7 @@ import { createApp } from "./app";
 import { createRateLimiter } from "./rateLimit";
 import { logger, serializeError } from "./logger";
 import { resolveCorsOptions } from "./corsConfig";
+import { parseTrustProxy } from "./trustProxy";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -82,6 +83,8 @@ const createMessage = anthropic
 
 // Fail closed in production: refuse to start without an explicit CORS allow-list.
 const corsOptions = resolveCorsOptions(process.env.CORS_ORIGIN, isProduction);
+// Default false (direct exposure) so X-Forwarded-For cannot be spoofed.
+const trustProxy = parseTrustProxy(process.env.TRUST_PROXY);
 
 const rateLimiter = createRateLimiter({ windowMs: 60_000, max: 10 });
 
@@ -92,6 +95,7 @@ const app = createApp({
   rateLimiter,
   logger,
   isProduction,
+  trustProxy,
   distPath: path.join(__dirname, "../dist"),
   corsOptions,
 });

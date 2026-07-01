@@ -21,6 +21,11 @@ export interface AppDeps {
   rateLimiter: RateLimiter;
   logger: Logger;
   isProduction: boolean;
+  /**
+   * Express `trust proxy` setting. Must match the real deployment topology, or
+   * clients can spoof X-Forwarded-For and bypass the per-IP rate limiter.
+   */
+  trustProxy: boolean | number | string;
   /** Absolute path to the built SPA (served in production). */
   distPath: string;
   /** Restrict CORS to specific origins; omit to allow any (fine for local dev). */
@@ -47,9 +52,10 @@ function asyncHandler(
 
 export function createApp(deps: AppDeps): express.Express {
   const app = express();
-  // Behind a reverse proxy, trust the first hop so req.ip is the real client
-  // (the rate limiter keys on it).
-  app.set("trust proxy", 1);
+  // Trust proxy must match the real topology (see AppDeps.trustProxy). Default
+  // false for direct exposure so a client can't spoof X-Forwarded-For to bypass
+  // the per-IP rate limiter.
+  app.set("trust proxy", deps.trustProxy);
 
   // Attach a request id (honoring an inbound X-Request-Id) for correlating logs.
   app.use((req, res, next) => {
