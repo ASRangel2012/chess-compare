@@ -7,6 +7,8 @@ import {
   getRecordForTimeClass,
   fetchRecentGames,
   fetchArchives,
+  jsonCacheSize,
+  JSON_CACHE_MAX,
 } from "./chessApi";
 import type { ChessPlayerStats } from "./types";
 
@@ -240,5 +242,28 @@ describe("chessApi network resilience", () => {
     // Fast-forward past the 15s per-request timeout so the AbortController fires.
     await vi.advanceTimersByTimeAsync(20_000);
     await assertion;
+  });
+});
+
+
+describe("jsonCache eviction (LRU cap)", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("bounds the cache to JSON_CACHE_MAX", async () => {
+    const fetchMock = vi.fn(
+      async (input: string | URL) =>
+        ({
+          ok: true,
+          status: 200,
+          headers: { get: () => null },
+          json: async () => ({ archives: [String(input)] }),
+        }) as unknown as Response
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    for (let i = 0; i < JSON_CACHE_MAX + 25; i++) {
+      await fetchArchives(`cap-user-${i}`);
+    }
+    expect(jsonCacheSize()).toBeLessThanOrEqual(JSON_CACHE_MAX);
+    expect(jsonCacheSize()).toBe(JSON_CACHE_MAX);
   });
 });
