@@ -208,6 +208,14 @@ describe("middleware", () => {
     expect(echoed.headers.get("x-request-id")).toBe("abc-123");
   });
 
+  it("caps a reflected inbound X-Request-Id at 128 chars", async () => {
+    const base = await start({ createMessage: null });
+    const res = await fetch(`${base}/api/health`, {
+      headers: { "X-Request-Id": "z".repeat(500) },
+    });
+    expect(res.headers.get("x-request-id")).toBe("z".repeat(128));
+  });
+
   it("sets baseline security headers", async () => {
     const base = await start({ createMessage: null });
     const res = await fetch(`${base}/api/health`);

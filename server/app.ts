@@ -60,7 +60,10 @@ export function createApp(deps: AppDeps): express.Express {
   // Attach a request id (honoring an inbound X-Request-Id) for correlating logs.
   app.use((req, res, next) => {
     const inbound = req.headers["x-request-id"];
-    const id = (typeof inbound === "string" && inbound) || randomUUID();
+    // Cap a reflected inbound id so a client can't bloat every log line with it.
+    const id =
+      (typeof inbound === "string" && inbound && inbound.slice(0, 128)) ||
+      randomUUID();
     res.locals.requestId = id;
     res.setHeader("X-Request-Id", id);
     next();
