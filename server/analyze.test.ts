@@ -9,12 +9,14 @@ import {
 
 function analysis(overrides: Partial<PlayerGameAnalysis> = {}): PlayerGameAnalysis {
   return {
+    username: "player",
     totalGames: 10,
     wins: 5,
     losses: 3,
     draws: 2,
     winRate: 50,
     avgMoveCount: 35,
+    commonOpenings: [],
     openingsAsWhite: [
       { name: "Italian Game", eco: "C50", games: 4, wins: 3, losses: 1, draws: 0, winRate: 75 },
     ],

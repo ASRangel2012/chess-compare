@@ -1,3 +1,12 @@
+// The AI contract types live in the shared module so client and server can't
+// drift. Re-exported here so existing importers keep using "./types".
+import type {
+  OpeningStats,
+  PlayerGameAnalysis,
+  PlayStyleInsight,
+} from "../../shared/contract";
+export type { OpeningStats, PlayerGameAnalysis, PlayStyleInsight };
+
 export interface ChessPlayerProfile {
   username: string;
   player_id: number;
@@ -70,44 +79,11 @@ export interface ParsedGame {
   accuracy?: number;
 }
 
-export interface OpeningStats {
-  name: string;
-  eco: string;
-  games: number;
-  wins: number;
-  losses: number;
-  draws: number;
-  winRate: number;
-}
-
-export interface PlayerGameAnalysis {
-  username: string;
-  totalGames: number;
-  wins: number;
-  losses: number;
-  draws: number;
-  winRate: number;
-  avgMoveCount: number;
-  openingsAsWhite: OpeningStats[];
-  openingsAsBlack: OpeningStats[];
-  commonOpenings: OpeningStats[];
-  gameLengthBuckets: { label: string; count: number }[];
-  timeClassBreakdown: Record<string, number>;
-}
-
 export interface StatRow {
   label: string;
   player1: string | number;
   player2: string | number;
   highlight?: "player1" | "player2" | "none";
-}
-
-export interface PlayStyleInsight {
-  player1: string;
-  player2: string;
-  matchup: string;
-  /** Deep, directional game plan for how player 1 can beat player 2. */
-  gamePlan: string;
 }
 
 export interface HeadToHeadGameEntry {

@@ -7,40 +7,14 @@
  * is exactly where bugs hide.
  */
 
-export interface OpeningStats {
-  name: string;
-  eco: string;
-  games: number;
-  wins: number;
-  losses: number;
-  draws: number;
-  winRate: number;
-}
-
-export interface PlayerGameAnalysis {
-  totalGames: number;
-  wins: number;
-  losses: number;
-  draws: number;
-  winRate: number;
-  avgMoveCount: number;
-  openingsAsWhite: OpeningStats[];
-  openingsAsBlack: OpeningStats[];
-  gameLengthBuckets: { label: string; count: number }[];
-  timeClassBreakdown: Record<string, number>;
-}
-
-export interface AnalyzeBody {
-  player1: { name: string; analysis: PlayerGameAnalysis };
-  player2: { name: string; analysis: PlayerGameAnalysis };
-}
-
-export interface PlayStyleInsight {
-  player1: string;
-  player2: string;
-  matchup: string;
-  gamePlan: string;
-}
+import type {
+  AnalyzeBody,
+  PlayerGameAnalysis,
+  PlayStyleInsight,
+} from "../shared/contract";
+// Re-export so existing importers (and tests) can keep importing these from
+// this module, while the single definition lives in the shared contract.
+export type { AnalyzeBody, PlayerGameAnalysis, PlayStyleInsight };
 
 export type Result<T> = { ok: true; value: T } | { ok: false; error: string };
 

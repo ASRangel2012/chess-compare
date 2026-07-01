@@ -26,12 +26,14 @@ const insight = {
 
 function analysis(): PlayerGameAnalysis {
   return {
+    username: "player",
     totalGames: 10,
     wins: 5,
     losses: 3,
     draws: 2,
     winRate: 50,
     avgMoveCount: 35,
+    commonOpenings: [],
     openingsAsWhite: [],
     openingsAsBlack: [],
     gameLengthBuckets: [],
