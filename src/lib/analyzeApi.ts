@@ -1,11 +1,14 @@
 import type { PlayStyleInsight, PlayerGameAnalysis } from "./types";
 
 /**
- * Client-side deadline for the AI proxy. Slightly longer than the server's own
- * SDK timeout (30s) so the server's error surfaces first when it can; this is
- * the backstop that stops a hung connection from spinning the UI forever.
+ * Client-side backstop for the AI proxy. Must exceed the server's own upstream
+ * deadline (ANTHROPIC_TIMEOUT_MS) so the server's clean success or error always
+ * arrives first; this only fires if the connection is truly hung. Override with
+ * VITE_ANALYZE_TIMEOUT_MS at build time.
  */
-const ANALYZE_TIMEOUT_MS = 35_000;
+const ANALYZE_TIMEOUT_MS = Number(
+  import.meta.env.VITE_ANALYZE_TIMEOUT_MS ?? 95_000
+);
 
 export async function fetchPlayStyleAnalysis(
   player1Analysis: PlayerGameAnalysis,

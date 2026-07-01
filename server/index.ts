@@ -14,6 +14,13 @@ const PORT = process.env.PORT ?? 3001;
 const isProduction = process.env.NODE_ENV === "production";
 const MODEL = process.env.ANTHROPIC_MODEL ?? "claude-haiku-4-5";
 const MAX_TOKENS = Number(process.env.ANTHROPIC_MAX_TOKENS ?? 4096);
+// Per-attempt upstream deadline. Sonnet needs far more than Haiku for a full
+// analysis, so this is generous and env-tunable. maxRetries defaults to 0 so
+// the deadline is a hard ceiling — the SDK's default of 2 retries would
+// multiply a timeout into ~3x the wait. Raise ANTHROPIC_MAX_RETRIES only if
+// you also accept the larger worst-case latency.
+const ANTHROPIC_TIMEOUT_MS = Number(process.env.ANTHROPIC_TIMEOUT_MS ?? 90_000);
+const ANTHROPIC_MAX_RETRIES = Number(process.env.ANTHROPIC_MAX_RETRIES ?? 0);
 
 const anthropic = process.env.ANTHROPIC_API_KEY
   ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
@@ -68,7 +75,7 @@ const createMessage = anthropic
         messages: [{ role: "user", content: prompt }],
         },
         // Bound the upstream call: a hung/slow model must not tie up the request.
-        { timeout: 30_000 }
+        { timeout: ANTHROPIC_TIMEOUT_MS, maxRetries: ANTHROPIC_MAX_RETRIES }
       );
 
       // Observability for an AI proxy: token cost and upstream latency are the
