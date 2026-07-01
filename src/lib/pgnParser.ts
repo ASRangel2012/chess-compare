@@ -64,7 +64,13 @@ export function normalizeResult(
   return "loss";
 }
 
-function countMoves(pgn: string): number {
+/**
+ * Count the moves in a game's PGN movetext. Note this counts *full moves* (each
+ * "N." move-number token, i.e. one per White move) rather than plies. That's
+ * consistent across every game, so averages and length buckets stay
+ * apples-to-apples. Exported so the head-to-head module shares one definition.
+ */
+export function countMoves(pgn: string): number {
   const moveSection = pgn.split("\n\n").slice(1).join("\n\n");
   const moves = moveSection.match(/\d+\.\s+\S+/g);
   return moves?.length ?? 0;
@@ -173,6 +179,7 @@ export function analyzeGames(
     timeClassBreakdown[g.timeClass] = (timeClassBreakdown[g.timeClass] ?? 0) + 1;
   }
 
+  // Average full-move count (see countMoves) — measured in full moves, not plies.
   const avgMoveCount =
     total > 0
       ? Math.round(parsed.reduce((sum, g) => sum + g.moveCount, 0) / total)

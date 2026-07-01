@@ -53,7 +53,10 @@ The backend reads these from `.env` (loaded via `dotenv`):
 |----------|----------|---------|---------|
 | `ANTHROPIC_API_KEY` | AI analysis only | — | Server-side key for the Claude proxy. Never sent to the browser. |
 | `ANTHROPIC_MODEL` | No | `claude-haiku-4-5` | Override the Claude model (e.g. `claude-sonnet-5` for longer, richer profiles). |
+| `ANTHROPIC_MAX_TOKENS` | No | `4096` | Upper bound on the model's reply. The analysis is one JSON object (two profiles, a matchup, and a detailed game plan); verbose models like Sonnet need enough room or the JSON is truncated and won't parse (`502`). |
 | `PORT` | No | `3001` | API port. The dev launcher auto-selects the next free port if this is taken; the Vite proxy follows it. |
+| `CORS_ORIGIN` | No | *(any)* | Comma-separated allow-list of origins for the API. Omit for permissive CORS (fine in dev); set it to your site on a public deployment. |
+| `LOG_LEVEL` | No | `info` | Minimum server log level (`debug` \| `info` \| `warn` \| `error`). Logs are emitted as structured JSON lines with a request id. |
 
 ### Running without an API key
 
@@ -110,7 +113,7 @@ TypeScript is split across `tsconfig.app.json` (React `src/`) and `tsconfig.node
 ## Docker
 
 ```bash
-cp .env .env
+cp .env.example .env
 # Add ANTHROPIC_API_KEY to .env
 
 docker compose up --build
@@ -139,24 +142,18 @@ docker run -p 3001:3001 -e ANTHROPIC_API_KEY=sk-ant-... chess-compare
 
 ## Testing & CI
 
-Unit tests live next to the code they cover (`src/lib/*.test.ts`) and run on [Vitest](https://vitest.dev):
+Unit tests live next to the code they cover (`src/lib/*.test.ts`, `server/*.test.ts`) and run on [Vitest](https://vitest.dev):
 
 ```bash
 npm test
 ```
 
-They cover the pure data layer — PGN parsing (`deriveTimeClass`, `normalizeResult`, opening-name resolution), per-player aggregation, and head-to-head summarization — plus a mocked-`fetch` test that verifies the archive fetcher's concurrency limit, caching, early-stop, and newest-first ordering.
+They cover:
 
-`.github/workflows/ci.yml` runs type-check → tests → production build on every push and pull request.
+- **Pure data layer** — PGN parsing (`deriveTimeClass`, `normalizeResult`, opening-name resolution), per-player aggregation, and head-to-head summarization.
+- **Chess engine** (`chess.ts`) — replaying famous games move-by-move, including castling, en passant, promotion, explicit disambiguation, and the implicit *disambiguation-by-pin* case (king-safety fallback).
+- **Network layer** — a mocked-`fetch` test that verifies the archive fetcher's concurrency limit, caching, early-stop, and newest-first ordering.
+- **Comparison orchestration** (`compare.ts`) — `Promise.allSettled` profile resolution and precise error mapping, tested with injected fakes (no network, no DOM).
+- **Server** (`analyze.ts`, `rateLimit.ts`, `app.ts`) — request validation, model-output parsing/shape-validation, the rate limiter, and the `/api/analyze` endpoint end-to-end with an injected Claude stub (503 / 400 / 429 / 502 / 200 paths).
 
-## Network layer
-
-Chess.com archives are fetched with bounded concurrency (6 in flight) rather than serially, with in-memory caching of the immutable archives list and completed months, a 15s per-request timeout, and bounded retry/back-off on HTTP 429.
-
-## Head-to-head
-
-Chess.com has no dedicated H2H endpoint. The app scans the last 48 months of Player 1's game archives and filters games where the opponent is Player 2 (standard chess only — chess960 and other variants are excluded). Opening names come from the PGN `ECOUrl` (Chess.com PGNs carry no `Opening` tag), and game format falls back to the PGN `TimeControl` when `time_class` is absent.
-
-## Theming
-
-CSS variables only (`--color-background-*`, `--color-text-*`, `--color-success`, `--color-danger`). Auto light/dark via `prefers-color-scheme`, with a manual toggle that sets `data-theme` on `<html>` so the entire page (including the body background) switches.
+`.github/workflows/ci.yml` runs type-che

@@ -1,0 +1,164 @@
+import { describe, it, expect, afterEach } from "vitest";
+import type { Server } from "node:http";
+import type { AddressInfo } from "node:net";
+import { createApp, type AppDeps } from "./app";
+import { createRateLimiter } from "./rateLimit";
+import type { Logger } from "./logger";
+import type { PlayerGameAnalysis } from "./analyze";
+
+// A no-op logger so tests don't spam stdout.
+const noopLogger: Logger = {
+  debug() {},
+  info() {},
+  warn() {},
+  error() {},
+  child() {
+    return noopLogger;
+  },
+};
+
+const insight = {
+  player1: "profile one",
+  player2: "profile two",
+  matchup: "the matchup",
+  gamePlan: "the plan",
+};
+
+function analysis(): PlayerGameAnalysis {
+  return {
+    totalGames: 10,
+    wins: 5,
+    losses: 3,
+    draws: 2,
+    winRate: 50,
+    avgMoveCount: 35,
+    openingsAsWhite: [],
+    openingsAsBlack: [],
+    gameLengthBuckets: [],
+    timeClassBreakdown: {},
+  };
+}
+
+function validBody() {
+  return {
+    player1: { name: "alice", analysis: analysis() },
+    player2: { name: "bob", analysis: analysis() },
+  };
+}
+
+let server: Server | undefined;
+
+async function start(overrides: Partial<AppDeps>): Promise<string> {
+  const app = createApp({
+    createMessage: null,
+    rateLimiter: createRateLimiter({ windowMs: 60_000, max: 10 }),
+    logger: noopLogger,
+    isProduction: false,
+    distPath: "/tmp",
+    ...overrides,
+  });
+  server = app.listen(0);
+  await new Promise<void>((resolve) => server!.once("listening", resolve));
+  const { port } = server!.address() as AddressInfo;
+  return `http://127.0.0.1:${port}`;
+}
+
+function post(base: string, body: unknown) {
+  return fetch(`${base}/api/analyze`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+afterEach(async () => {
+  if (server) {
+    await new Promise<void>((resolve) => server!.close(() => resolve()));
+    server = undefined;
+  }
+});
+
+describe("POST /api/analyze", () => {
+  it("503 when no API key is configured", async () => {
+    const base = await start({ createMessage: null });
+    const res = await post(base, validBody());
+    expect(res.status).toBe(503);
+  });
+
+  it("400 when the body is missing analysis data", async () => {
+    const base = await start({ createMessage: async () => JSON.stringify(insight) });
+    const res = await post(base, {});
+    expect(res.status).toBe(400);
+  });
+
+  it("200 with the parsed insight on the happy path", async () => {
+    const base = await start({ createMessage: async () => JSON.stringify(insight) });
+    const res = await post(base, validBody());
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(insight);
+  });
+
+  it("502 when the model returns unusable output", async () => {
+    const base = await start({ createMessage: async () => "sorry, no JSON today" });
+    const res = await post(base, validBody());
+    expect(res.status).toBe(502);
+  });
+
+  it("500 when the model call throws", async () => {
+    const base = await start({
+      createMessage: async () => {
+        throw new Error("upstream boom");
+      },
+    });
+    const res = await post(base, validBody());
+    expect(res.status).toBe(500);
+    const payload = (await res.json()) as { error: string };
+    expect(payload.error).toContain("upstream boom");
+  });
+
+  it("429 once the per-IP rate limit is exceeded", async () => {
+    const base = await start({
+      createMessage: async () => JSON.stringify(insight),
+      rateLimiter: createRateLimiter({ windowMs: 60_000, max: 1 }),
+    });
+    expect((await post(base, validBody())).status).toBe(200);
+    const blocked = await post(base, validBody());
+    expect(blocked.status).toBe(429);
+    expect(blocked.headers.get("Retry-After")).toBeTruthy();
+  });
+});
+
+describe("GET /api/health", () => {
+  it("reports hasApiKey=false without a key", async () => {
+    const base = await start({ createMessage: null });
+    const res = await fetch(`${base}/api/health`);
+    expect(await res.json()).toEqual({ ok: true, hasApiKey: false });
+  });
+
+  it("reports hasApiKey=true with a key", async () => {
+    const base = await start({ createMessage: async () => JSON.stringify(insight) });
+    const res = await fetch(`${base}/api/health`);
+    expect(await res.json()).toEqual({ ok: true, hasApiKey: true });
+  });
+});
+
+describe("middleware", () => {
+  it("stamps and echoes a request id, and honors an inbound one", async () => {
+    const base = await start({ createMessage: null });
+
+    const generated = await fetch(`${base}/api/health`);
+    expect(generated.headers.get("x-request-id")).toBeTruthy();
+
+    const echoed = await fetch(`${base}/api/health`, {
+      headers: { "X-Request-Id": "abc-123" },
+    });
+    expect(echoed.headers.get("x-request-id")).toBe("abc-123");
+  });
+
+  it("sets baseline security headers", async () => {
+    const base = await start({ createMessage: null });
+    const res = await fetch(`${base}/api/health`);
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(res.headers.get("x-frame-options")).toBe("DENY");
+  });
+});

@@ -85,6 +85,31 @@ describe("replayGame — promotion", () => {
   });
 });
 
+describe("replayGame — implicit disambiguation by pin", () => {
+  // 1.e4 e6 2.d4 Bb4+ 3.Nc3 a5 4.Nh3 d6 5.Nf4 Nc6 6.Nd5
+  // Both the c3- and f4-knights can geometrically reach d5, so the SAN carries
+  // no disambiguation — but the c3-knight is pinned to the e1-king by the
+  // b4-bishop, so only Nf4-d5 is legal. This is the one case that forces the
+  // engine's king-safety fallback rather than plain file/rank disambiguation.
+  // c3 (index 18) is scanned before f4 (index 29), so a naive candidates[0]
+  // would wrongly pick the pinned knight.
+  const pgn = "1. e4 e6 2. d4 Bb4+ 3. Nc3 a5 4. Nh3 d6 5. Nf4 Nc6 6. Nd5";
+  const plies = replayGame(pgn);
+
+  it("replays all 11 half-moves", () => {
+    expect(plies).toHaveLength(12); // 11 plies + start
+    expect(plies[plies.length - 1].san).toBe("Nd5");
+  });
+
+  it("moves the unpinned f4-knight, leaving the pinned c3-knight in place", () => {
+    const final = plies[plies.length - 1].board;
+    expect(final[idx("d5")]).toBe("N"); // knight arrived
+    expect(final[idx("f4")]).toBeNull(); // it came from f4, not c3
+    expect(final[idx("c3")]).toBe("N"); // the pinned knight never moved
+    expect(plies[plies.length - 1].lastMove).toEqual([idx("f4"), idx("d5")]);
+  });
+});
+
 describe("squareName", () => {
   it("round-trips index to algebraic", () => {
     expect(squareName(0)).toBe("a1");

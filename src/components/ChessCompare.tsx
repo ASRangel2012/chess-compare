@@ -9,6 +9,7 @@ import {
   IconMoon,
   IconSearch,
   IconHistory,
+  IconTargetArrow,
 } from "@tabler/icons-react";
 import { useChessCompare } from "../hooks/useChessCompare";
 import { PlayerCard } from "./PlayerCard";
@@ -16,6 +17,7 @@ import { StatsComparison } from "./StatsComparison";
 import { OpeningAnalysis } from "./OpeningAnalysis";
 import { HeadToHeadHistory } from "./HeadToHeadHistory";
 import { PlayStyleAnalysis } from "./PlayStyleAnalysis";
+import { GamePlan } from "./GamePlan";
 import * as React from "react";
 
 export function ChessCompare() {
@@ -25,8 +27,6 @@ export function ChessCompare() {
   const { loading, loadingHeadToHead, analyzingStyle, error, result, compare, retryAiAnalysis } =
     useChessCompare();
 
-  // Apply the theme to <html> so the whole page (including body background)
-  // switches, not just the .app container. "auto" defers to prefers-color-scheme.
   useEffect(() => {
     const root = document.documentElement;
     if (theme === "auto") {
@@ -192,6 +192,20 @@ export function ChessCompare() {
               <h2>AI Play Style Analysis</h2>
             </div>
             <PlayStyleAnalysis
+              player1Name={result.player1.username}
+              player2Name={result.player2.username}
+              insights={result.insights}
+              loading={analyzingStyle}
+              onRetry={retryAiAnalysis}
+            />
+          </section>
+
+          <section className="section">
+            <div className="section-header">
+              <IconTargetArrow size={20} />
+              <h2>Game Plan</h2>
+            </div>
+            <GamePlan
               player1Name={result.player1.username}
               player2Name={result.player2.username}
               insights={result.insights}

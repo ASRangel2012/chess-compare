@@ -1,202 +1,109 @@
 import "dotenv/config";
-import express from "express";
-import cors from "cors";
 import path from "path";
 import { fileURLToPath } from "url";
 import Anthropic from "@anthropic-ai/sdk";
+import { createApp } from "./app";
+import { createRateLimiter } from "./rateLimit";
+import { logger } from "./logger";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const app = express();
 const PORT = process.env.PORT ?? 3001;
 const isProduction = process.env.NODE_ENV === "production";
-
-// Model is overridable via env so a retired snapshot can be swapped without a
-// code change. Haiku is fast and cheap, which suits these short analyses.
 const MODEL = process.env.ANTHROPIC_MODEL ?? "claude-haiku-4-5";
-
-app.set("trust proxy", 1);
-app.use(cors());
-app.use(express.json({ limit: "1mb" }));
-
-/**
- * Lightweight in-memory, per-IP rate limiter for the AI endpoint so a public
- * deployment can't be abused to burn the Anthropic budget. Fixed-window.
- * For multi-instance deployments, swap for a shared store (e.g. Redis).
- */
-const RATE_LIMIT_WINDOW_MS = 60_000;
-const RATE_LIMIT_MAX = 10;
-const rateBuckets = new Map<string, { count: number; resetAt: number }>();
-
-function rateLimit(
-  req: express.Request,
-  res: express.Response,
-  next: express.NextFunction
-) {
-  const now = Date.now();
-  const ip = req.ip ?? "unknown";
-  const bucket = rateBuckets.get(ip);
-
-  if (!bucket || now > bucket.resetAt) {
-    rateBuckets.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
-    return next();
-  }
-
-  if (bucket.count >= RATE_LIMIT_MAX) {
-    res.setHeader("Retry-After", Math.ceil((bucket.resetAt - now) / 1000));
-    return res.status(429).json({
-      error: "Too many analysis requests. Please wait a minute and try again.",
-    });
-  }
-
-  bucket.count++;
-  next();
-}
-
-// Periodically evict stale buckets so the map can't grow unbounded.
-setInterval(() => {
-  const now = Date.now();
-  for (const [ip, bucket] of rateBuckets) {
-    if (now > bucket.resetAt) rateBuckets.delete(ip);
-  }
-}, RATE_LIMIT_WINDOW_MS).unref();
+const MAX_TOKENS = Number(process.env.ANTHROPIC_MAX_TOKENS ?? 4096);
 
 const anthropic = process.env.ANTHROPIC_API_KEY
   ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
   : null;
 
-interface OpeningStats {
-  name: string;
-  eco: string;
-  games: number;
-  wins: number;
-  losses: number;
-  draws: number;
-  winRate: number;
-}
+// Get structured output via a forced tool call instead of asking the model to
+// hand-write JSON. Multi-paragraph string values (the profiles and game plan)
+// routinely contain literal newlines and quotes that break JSON.parse; letting
+// the API return the tool input as an already-parsed object sidesteps that
+// entire class of failure. We re-stringify it so the parse/shape-validation
+// pipeline (and its tests) stay unchanged.
+const ANALYSIS_TOOL_NAME = "emit_play_style_analysis";
 
-interface PlayerGameAnalysis {
-  totalGames: number;
-  wins: number;
-  losses: number;
-  draws: number;
-  winRate: number;
-  avgMoveCount: number;
-  openingsAsWhite: OpeningStats[];
-  openingsAsBlack: OpeningStats[];
-  gameLengthBuckets: { label: string; count: number }[];
-  timeClassBreakdown: Record<string, number>;
-}
+const createMessage = anthropic
+  ? async (prompt: string): Promise<string> => {
+      const message = await anthropic.messages.create({
+        model: MODEL,
+        max_tokens: MAX_TOKENS,
+        tools: [
+          {
+            name: ANALYSIS_TOOL_NAME,
+            description:
+              "Return the two play-style profiles, the style matchup, and the game plan for player 1.",
+            input_schema: {
+              type: "object",
+              properties: {
+                player1: {
+                  type: "string",
+                  description: "2-3 paragraph play-style profile for the first player",
+                },
+                player2: {
+                  type: "string",
+                  description: "2-3 paragraph play-style profile for the second player",
+                },
+                matchup: {
+                  type: "string",
+                  description: "1-2 paragraph analysis of how the two styles clash",
+                },
+                gamePlan: {
+                  type: "string",
+                  description:
+                    "detailed, multi-paragraph game plan for how player 1 can beat player 2",
+                },
+              },
+              required: ["player1", "player2", "matchup", "gamePlan"],
+            },
+          },
+        ],
+        tool_choice: { type: "tool", name: ANALYSIS_TOOL_NAME },
+        messages: [{ role: "user", content: prompt }],
+      });
 
-interface AnalyzeBody {
-  player1: { name: string; analysis: PlayerGameAnalysis };
-  player2: { name: string; analysis: PlayerGameAnalysis };
-}
+      if (message.stop_reason === "max_tokens") {
+        throw new Error(
+          `Model reply hit the ${MAX_TOKENS}-token cap before finishing. Raise ANTHROPIC_MAX_TOKENS and retry.`
+        );
+      }
 
-function summarizeForPrompt(name: string, analysis: PlayerGameAnalysis): string {
-  const topWhite = analysis.openingsAsWhite
-    .slice(0, 5)
-    .map((o) => `${o.name} (${o.eco}): ${o.games} games, ${o.winRate}% win rate`)
-    .join("\n  ");
-  const topBlack = analysis.openingsAsBlack
-    .slice(0, 5)
-    .map((o) => `${o.name} (${o.eco}): ${o.games} games, ${o.winRate}% win rate`)
-    .join("\n  ");
-  const lengths = analysis.gameLengthBuckets
-    .map((b) => `${b.label}: ${b.count}`)
-    .join(", ");
-
-  return `
-Player: ${name}
-Recent games analyzed: ${analysis.totalGames}
-Record: ${analysis.wins}W / ${analysis.losses}L / ${analysis.draws}D (${analysis.winRate}% win rate)
-Average game length: ${analysis.avgMoveCount} moves
-Game length distribution: ${lengths}
-Time controls: ${JSON.stringify(analysis.timeClassBreakdown)}
-Top openings as White:
-  ${topWhite || "None"}
-Top openings as Black:
-  ${topBlack || "None"}
-`.trim();
-}
-
-app.post("/api/analyze", rateLimit, async (req, res) => {
-  if (!anthropic) {
-    return res.status(503).json({
-      error:
-        "ANTHROPIC_API_KEY is not configured. Copy .env to .env and add your key.",
-    });
-  }
-
-  const body = req.body as AnalyzeBody;
-  if (!body?.player1?.analysis || !body?.player2?.analysis) {
-    return res.status(400).json({ error: "Missing player analysis data" });
-  }
-
-  const prompt = `You are a chess coach analyzing two Chess.com players based on their recent game statistics.
-
-${summarizeForPrompt(body.player1.name, body.player1.analysis)}
-
----
-
-${summarizeForPrompt(body.player2.name, body.player2.analysis)}
-
-Write concise, insightful chess personality profiles for each player and a brief head-to-head style matchup analysis.
-
-Respond in JSON only with this exact shape:
-{
-  "player1": "2-3 paragraph profile for ${body.player1.name}",
-  "player2": "2-3 paragraph profile for ${body.player2.name}",
-  "matchup": "1-2 paragraph analysis of how these styles would clash, what to watch for, and strategic recommendations"
-}
-
-Focus on: opening preferences, tactical vs positional tendencies, game length patterns, aggression level, and time control habits. Be specific and reference the data. Avoid generic advice.`;
-
-  try {
-    const message = await anthropic.messages.create({
-      model: MODEL,
-      max_tokens: 1500,
-      messages: [{ role: "user", content: prompt }],
-    });
-
-    const text =
-      message.content[0]?.type === "text" ? message.content[0].text : "";
-
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      return res.status(500).json({ error: "Failed to parse AI response" });
+      const toolUse = message.content.find((block) => block.type === "tool_use");
+      if (!toolUse || toolUse.type !== "tool_use") {
+        throw new Error("Model did not return the expected structured analysis.");
+      }
+      // toolUse.input is already-parsed JSON; re-stringify for the shape check.
+      return JSON.stringify(toolUse.input);
     }
+  : null;
 
-    const parsed = JSON.parse(jsonMatch[0]) as {
-      player1: string;
-      player2: string;
-      matchup: string;
-    };
+const corsOrigin = process.env.CORS_ORIGIN?.split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+const corsOptions =
+  corsOrigin && corsOrigin.length > 0 ? { origin: corsOrigin } : undefined;
 
-    res.json(parsed);
-  } catch (err) {
-    console.error("Claude API error:", err);
-    res.status(500).json({
-      error: err instanceof Error ? err.message : "Analysis request failed",
-    });
-  }
+const rateLimiter = createRateLimiter({ windowMs: 60_000, max: 10 });
+
+setInterval(() => rateLimiter.sweep(), 60_000).unref();
+
+const app = createApp({
+  createMessage,
+  rateLimiter,
+  logger,
+  isProduction,
+  distPath: path.join(__dirname, "../dist"),
+  corsOptions,
 });
 
-app.get("/api/health", (_req, res) => {
-  res.json({ ok: true, hasApiKey: Boolean(anthropic) });
-});
-
-if (isProduction) {
-  const distPath = path.join(__dirname, "../dist");
-  app.use(express.static(distPath));
-  app.get("*", (_req, res) => {
-    res.sendFile(path.join(distPath, "index.html"));
-  });
-}
-
-// Entry point.
 app.listen(PORT, () => {
-  console.log(
-    `Server running on http://localhost:${PORT}${isProduction ? " (production)" : " (API only — use Vite on :5173 for frontend)"}`
-  );
+  logger.info("server started", {
+    port: Number(PORT),
+    mode: isProduction ? "production" : "api-only",
+    hasApiKey: Boolean(createMessage),
+    model: MODEL,
+  });
 });
+

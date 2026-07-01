@@ -1,15 +1,9 @@
 import { useCallback, useState } from "react";
-import {
-  fetchPlayerProfile,
-  fetchPlayerStats,
-  fetchRecentGames,
-  fetchHeadToHeadGames,
-  normalizeUsername,
-  findCommonOpenings,
-} from "../lib/chessApi";
-import { analyzeGames } from "../lib/pgnParser";
+import { fetchHeadToHeadGames, normalizeUsername } from "../lib/chessApi";
 import { analyzeHeadToHead } from "../lib/headToHead";
 import { fetchPlayStyleAnalysis } from "../lib/analyzeApi";
+import { runComparison, validateUsernames, MAX_GAMES } from "../lib/compare";
+import { logger } from "../lib/logger";
 import type {
   ChessPlayerProfile,
   ChessPlayerStats,
@@ -17,8 +11,6 @@ import type {
   PlayStyleInsight,
   HeadToHeadSummary,
 } from "../lib/types";
-
-const MAX_GAMES = 50;
 
 export interface CompareResult {
   player1: {
@@ -58,16 +50,13 @@ export function useChessCompare() {
 
   const compare = useCallback(
     async (username1: string, username2: string, withAi = true) => {
-      const u1 = normalizeUsername(username1);
-      const u2 = normalizeUsername(username2);
-
-      if (!u1 || !u2) {
-        setError("Please enter both usernames.");
-        return;
-      }
-
-      if (u1 === u2) {
-        setError("Enter two different players to compare.");
+      // Validate up front so an invalid pair never shows a spinner.
+      const validationError = validateUsernames(
+        normalizeUsername(username1),
+        normalizeUsername(username2)
+      );
+      if (validationError) {
+        setError(validationError);
         return;
       }
 
@@ -75,86 +64,59 @@ export function useChessCompare() {
       setError(null);
       setResult(null);
 
+      let core;
       try {
-        const [
-          profile1,
-          profile2,
-          stats1,
-          stats2,
-          games1,
-          games2,
-        ] = await Promise.all([
-          fetchPlayerProfile(u1),
-          fetchPlayerProfile(u2),
-          fetchPlayerStats(u1),
-          fetchPlayerStats(u2),
-          fetchRecentGames(u1, MAX_GAMES),
-          fetchRecentGames(u2, MAX_GAMES),
-        ]);
-
-        const analysis1 = analyzeGames(games1, u1);
-        const analysis2 = analyzeGames(games2, u2);
-
-        const commonOpenings = findCommonOpenings(
-          analysis1.commonOpenings.map((o) => ({ name: o.name, eco: o.eco })),
-          analysis2.commonOpenings.map((o) => ({ name: o.name, eco: o.eco }))
-        );
-
-        const baseResult: CompareResult = {
-          player1: {
-            username: u1,
-            profile: profile1,
-            stats: stats1,
-            analysis: analysis1,
-          },
-          player2: {
-            username: u2,
-            profile: profile2,
-            stats: stats2,
-            analysis: analysis2,
-          },
-          commonOpenings,
-          headToHead: EMPTY_HEAD_TO_HEAD,
-          insights: null,
-        };
-
-        setResult(baseResult);
-        setLoading(false);
-
-        setLoadingHeadToHead(true);
-        fetchHeadToHeadGames(u1, u2)
-          .then((h2hGames) => {
-            const headToHead = analyzeHeadToHead(h2hGames, u1, u2);
-            setResult((prev) => (prev ? { ...prev, headToHead } : prev));
-          })
-          .catch(() => {
-            /* H2H is best-effort; main comparison still valid */
-          })
-          .finally(() => setLoadingHeadToHead(false));
-
-        if (withAi && analysis1.totalGames > 0 && analysis2.totalGames > 0) {
-          setAnalyzingStyle(true);
-          try {
-            const insights = await fetchPlayStyleAnalysis(
-              analysis1,
-              analysis2,
-              u1,
-              u2
-            );
-            setResult((prev) => (prev ? { ...prev, insights } : prev));
-          } catch (aiErr) {
-            setError(
-              aiErr instanceof Error
-                ? `Stats loaded, but AI analysis failed: ${aiErr.message}`
-                : "AI analysis failed"
-            );
-          } finally {
-            setAnalyzingStyle(false);
-          }
-        }
+        core = await runComparison(username1, username2, { maxGames: MAX_GAMES });
       } catch (err) {
+        logger.warn("comparison failed", err);
         setError(err instanceof Error ? err.message : "Comparison failed");
         setLoading(false);
+        return;
+      }
+
+      const u1 = core.player1.username;
+      const u2 = core.player2.username;
+
+      setResult({ ...core, headToHead: EMPTY_HEAD_TO_HEAD, insights: null });
+      setLoading(false);
+
+      // Head-to-head is best-effort — a failed archive scan must not fail the
+      // main comparison, but it should still be visible to a developer.
+      setLoadingHeadToHead(true);
+      fetchHeadToHeadGames(u1, u2)
+        .then((h2hGames) => {
+          const headToHead = analyzeHeadToHead(h2hGames, u1, u2);
+          setResult((prev) => (prev ? { ...prev, headToHead } : prev));
+        })
+        .catch((h2hErr) => {
+          logger.warn("head-to-head scan failed; showing comparison without it", h2hErr);
+        })
+        .finally(() => setLoadingHeadToHead(false));
+
+      if (
+        withAi &&
+        core.player1.analysis.totalGames > 0 &&
+        core.player2.analysis.totalGames > 0
+      ) {
+        setAnalyzingStyle(true);
+        try {
+          const insights = await fetchPlayStyleAnalysis(
+            core.player1.analysis,
+            core.player2.analysis,
+            u1,
+            u2
+          );
+          setResult((prev) => (prev ? { ...prev, insights } : prev));
+        } catch (aiErr) {
+          logger.error("AI play style analysis failed", aiErr);
+          setError(
+            aiErr instanceof Error
+              ? `Stats loaded, but AI analysis failed: ${aiErr.message}`
+              : "AI analysis failed"
+          );
+        } finally {
+          setAnalyzingStyle(false);
+        }
       }
     },
     []
@@ -173,6 +135,7 @@ export function useChessCompare() {
       );
       setResult((prev) => (prev ? { ...prev, insights } : prev));
     } catch (err) {
+      logger.error("AI play style analysis retry failed", err);
       setError(err instanceof Error ? err.message : "AI analysis failed");
     } finally {
       setAnalyzingStyle(false);

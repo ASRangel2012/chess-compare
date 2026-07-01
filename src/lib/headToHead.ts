@@ -4,6 +4,7 @@ import {
   normalizeResult,
   extractOpeningName,
   deriveTimeClass,
+  countMoves,
 } from "./pgnParser";
 import type { HeadToHeadGameEntry, HeadToHeadSummary } from "./types";
 
@@ -33,8 +34,7 @@ export function analyzeHeadToHead(
 
     const opening = extractOpeningName(game);
     const eco = parsePgnHeader(game.pgn, "ECO") ?? "—";
-    const moveSection = game.pgn.split("\n\n").slice(1).join("\n\n");
-    const moveCount = moveSection.match(/\d+\.\s+\S+/g)?.length ?? 0;
+    const moveCount = countMoves(game.pgn);
 
     entries.push({
       url: game.url,

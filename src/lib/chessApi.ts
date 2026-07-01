@@ -85,26 +85,35 @@ async function fetchJson<T>(url: string, opts: FetchOptions = {}): Promise<T> {
 }
 
 /**
- * Run an async mapper over `items` with at most `limit` operations in flight,
- * processing items in order and stopping early once `done()` returns true.
- * Used to fetch monthly archives concurrently instead of one-at-a-time.
+ * Fetch monthly archives in ordered batches of at most `concurrency` requests,
+ * handing each month's games to `onMonth` (in newest-first archive order).
+ * Stops as soon as `onMonth` returns false — the caller signals it has enough.
+ *
+ * Why batches and not a greedy sliding-window pool? This backs an *early-stop*
+ * scan: we only want the newest N games. A greedy pool grabs the next archive
+ * the instant any worker frees up, so by the time enough games have arrived it
+ * has already fired several more requests — over-fetching archives and being a
+ * worse Chess.com citizen. Evaluating the stop condition at each batch boundary
+ * caps the overshoot at a single bounded round while still fetching
+ * `concurrency` archives in parallel. Months are consumed in input order, so
+ * newest-first ordering is deterministic and never depends on which request
+ * happens to resolve first.
  */
-async function mapInBatches<T, R>(
-  items: T[],
-  limit: number,
-  mapper: (item: T, index: number) => Promise<R>,
-  done: () => boolean
-): Promise<R[]> {
-  const results: R[] = [];
-  for (let i = 0; i < items.length; i += limit) {
-    if (done()) break;
-    const batch = items.slice(i, i + limit);
-    const batchResults = await Promise.all(
-      batch.map((item, j) => mapper(item, i + j))
+async function scanArchives(
+  archiveUrls: string[],
+  concurrency: number,
+  onMonth: (games: ChessGame[], index: number) => boolean
+): Promise<void> {
+  for (let i = 0; i < archiveUrls.length; i += concurrency) {
+    const batch = archiveUrls.slice(i, i + concurrency);
+    // index 0 is the current, still-changing month — don't cache it.
+    const months = await Promise.all(
+      batch.map((url, j) => fetchMonthlyGames(url, { cache: i + j !== 0 }))
     );
-    results.push(...batchResults);
+    for (let j = 0; j < months.length; j++) {
+      if (!onMonth(months[j], i + j)) return;
+    }
   }
-  return results;
 }
 
 export async function fetchPlayerProfile(
@@ -150,16 +159,10 @@ export async function fetchRecentGames(
   const recentArchives = [...archives].reverse(); // most recent month first
   const games: ChessGame[] = [];
 
-  await mapInBatches(
-    recentArchives,
-    concurrency,
-    async (archiveUrl, index) => {
-      // index 0 is the current, still-changing month — don't cache it.
-      const monthly = await fetchMonthlyGames(archiveUrl, { cache: index !== 0 });
-      games.push(...[...monthly].reverse());
-    },
-    () => games.length >= maxGames
-  );
+  await scanArchives(recentArchives, concurrency, (monthly) => {
+    games.push(...[...monthly].reverse());
+    return games.length < maxGames; // keep scanning until we have enough
+  });
 
   return games.slice(0, maxGames);
 }
@@ -236,26 +239,21 @@ export async function fetchHeadToHeadGames(
   const games: ChessGame[] = [];
   const seen = new Set<string>();
 
-  await mapInBatches(
-    recentArchives,
-    ARCHIVE_CONCURRENCY,
-    async (archiveUrl, index) => {
-      const monthly = await fetchMonthlyGames(archiveUrl, { cache: index !== 0 });
-      for (const game of monthly) {
-        // Only standard chess — exclude chess960 and other variants.
-        if ((game.rules ?? "chess") !== "chess") continue;
-        const white = game.white.username.toLowerCase();
-        const black = game.black.username.toLowerCase();
-        const isMatch =
-          (white === u1 && black === u2) || (white === u2 && black === u1);
-        if (isMatch && !seen.has(game.url)) {
-          seen.add(game.url);
-          games.push(game);
-        }
+  await scanArchives(recentArchives, ARCHIVE_CONCURRENCY, (monthly) => {
+    for (const game of monthly) {
+      // Only standard chess — exclude chess960 and other variants.
+      if ((game.rules ?? "chess") !== "chess") continue;
+      const white = game.white.username.toLowerCase();
+      const black = game.black.username.toLowerCase();
+      const isMatch =
+        (white === u1 && black === u2) || (white === u2 && black === u1);
+      if (isMatch && !seen.has(game.url)) {
+        seen.add(game.url);
+        games.push(game);
       }
-    },
-    () => games.length >= maxGames
-  );
+    }
+    return games.length < maxGames;
+  });
 
   return games.sort((a, b) => b.end_time - a.end_time).slice(0, maxGames);
 }

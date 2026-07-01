@@ -106,6 +106,8 @@ export interface PlayStyleInsight {
   player1: string;
   player2: string;
   matchup: string;
+  /** Deep, directional game plan for how player 1 can beat player 2. */
+  gamePlan: string;
 }
 
 export interface HeadToHeadGameEntry {

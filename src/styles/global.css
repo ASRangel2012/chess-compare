@@ -911,3 +911,13 @@ a:hover {
 .h2h-viewer-row .h2h-viewer {
   margin: 0 0 var(--space-sm);
 }
+
+/* Game-plan card: distinct "battle briefing" accent */
+.insight-block.gameplan {
+  border-left: 3px solid var(--color-warning);
+  padding-left: var(--space-md);
+}
+
+.insight-block.gameplan h3 {
+  color: var(--color-warning);
+}
