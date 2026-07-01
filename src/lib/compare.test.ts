@@ -42,6 +42,14 @@ describe("validateUsernames", () => {
 
   it("accepts a valid distinct pair", () => {
     expect(validateUsernames("alice", "bob")).toBeNull();
+    expect(validateUsernames("hikaru", "magnus_c")).toBeNull();
+  });
+
+  it("rejects invalid characters or out-of-range length", () => {
+    expect(validateUsernames("ab", "bob")).toMatch(/valid Chess\.com/);
+    expect(validateUsernames("alice", "b!b")).toMatch(/valid Chess\.com/);
+    expect(validateUsernames("a".repeat(26), "bob")).toMatch(/valid Chess\.com/);
+    expect(validateUsernames("wu", "li")).toMatch(/valid Chess\.com/);
   });
 });
 
