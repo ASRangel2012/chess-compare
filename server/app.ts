@@ -120,9 +120,11 @@ export function createApp(deps: AppDeps): express.Express {
     try {
       text = await deps.createMessage(prompt);
     } catch (err) {
+      // Log the detail, return a generic message (mirrors the 502 parse path):
+      // SDK/network errors can carry internal detail we must not leak.
       log.error("model request failed", { err: serializeError(err) });
       return res.status(500).json({
-        error: err instanceof Error ? err.message : "Analysis request failed",
+        error: "Analysis request failed. Please retry.",
       });
     }
 

@@ -132,7 +132,8 @@ describe("POST /api/analyze", () => {
     const res = await post(base, validBody());
     expect(res.status).toBe(500);
     const payload = (await res.json()) as { error: string };
-    expect(payload.error).toContain("upstream boom");
+    expect(payload.error).toBe("Analysis request failed. Please retry.");
+    expect(payload.error).not.toContain("upstream boom");
   });
 
   it("routes an unexpected middleware throw to a generic 500 without leaking detail", async () => {
