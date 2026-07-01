@@ -29,7 +29,8 @@ const ANALYSIS_TOOL_NAME = "emit_play_style_analysis";
 
 const createMessage = anthropic
   ? async (prompt: string): Promise<string> => {
-      const message = await anthropic.messages.create({
+      const message = await anthropic.messages.create(
+        {
         model: MODEL,
         max_tokens: MAX_TOKENS,
         tools: [
@@ -64,7 +65,10 @@ const createMessage = anthropic
         ],
         tool_choice: { type: "tool", name: ANALYSIS_TOOL_NAME },
         messages: [{ role: "user", content: prompt }],
-      });
+        },
+        // Bound the upstream call: a hung/slow model must not tie up the request.
+        { timeout: 30_000 }
+      );
 
       if (message.stop_reason === "max_tokens") {
         throw new Error(
