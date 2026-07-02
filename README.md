@@ -135,35 +135,46 @@ Prometheus can scrape `/metrics` via the pod annotations already set in the
 Deployment; if you put an Ingress in front, exclude `/metrics` from public
 routing.
 
+## Scaling limits
+
+Honest constraints of the current single-instance design, what breaks first,
+and what changes them:
+
+- **The per-IP rate limiter is in-memory and per process.** N replicas hand one
+  client N× the 10 req/min budget, and a rolling deploy resets every bucket.
+  It is also a fixed window, so a client can burst up to 2× across a window
+  boundary. When scaling out matters, move the buckets to a shared store
+  (Redis token bucket / sliding window) — the limiter is already an injected
+  factory (`server/rateLimit.ts`), so the swap stays contained.
+- **The analyze concurrency cap is per process.** The real ceiling on
+  simultaneous Claude calls — and on worst-case spend — is
+  replicas × `ANALYZE_MAX_CONCURRENT`. Budget it per replica, or enforce it in
+  a shared queue if the fleet grows.
+- **What saturates first at 10× traffic is the AI endpoint, by design.**
+  Chess.com data is fetched by each visitor's browser, so backend load is the
+  Claude proxy plus static files. Overload surfaces as shed 503s
+  (`analyze_shed_total`, `analyze_semaphore_in_use` pinned at `_max`) — alert
+  on those, raise `ANALYZE_MAX_CONCURRENT`/replicas deliberately, and mind the
+  spend multiplication above.
+
 ## IntelliJ IDEA / WebStorm
 
-The project includes shared run configurations in `.run/` and a WEB module in `.idea/`.
-
-### One-time setup
+IDE metadata (`.idea/`, `.run/`) is intentionally **not** committed — a fresh
+clone contains no IDE configuration. One-time setup:
 
 1. **Open the project** — File → Open → select the `chess-compare` folder.
-2. **Node.js** — Settings → Languages & Frameworks → Node.js  
-   Set the interpreter to your local Node 22+ install (or let IntelliJ download one).
-3. **Install dependencies** — open the built-in terminal and run:
-   ```bash
-   npm install
-   ```
-4. **Environment** — copy `.env.example` to `.env` and add your `ANTHROPIC_API_KEY`.  
-   The API server loads this automatically via `dotenv`.
+2. **Node.js** — Settings → Languages & Frameworks → Node.js: point the
+   interpreter at a local Node 22+ install.
+3. **Install dependencies** — `npm install` in the built-in terminal.
+4. **Environment** — copy `.env.example` to `.env` and add your
+   `ANTHROPIC_API_KEY` (optional; see "Running without an API key").
 
-### Run configurations (top-right dropdown)
+Then run everything through the npm scripts (see [Scripts](#scripts)):
+`npm run dev` is the one-command default (API + Vite with hot reload), and each
+script can be wrapped in an IDE run configuration if you prefer buttons.
 
-| Configuration | What it does |
-|---------------|--------------|
-| **Chess Compare - Dev (Compound)** *(default)* | Starts API server (`:3001`) and Vite (`:5173`) in separate run tabs |
-| **Chess Compare - Dev** | Single process via `concurrently` |
-| **Dev Server (API)** | Express/Claude proxy only |
-| **Dev Client (Vite)** | React frontend only (needs API running separately) |
-| **Production** | `npm run build` then serves UI + API on `:3001` |
-
-Use **Chess Compare - Dev (Compound)**, then open [http://localhost:5173](http://localhost:5173).
-
-TypeScript is split across `tsconfig.app.json` (React `src/`) and `tsconfig.node.json` (`server/` + Vite config) so IntelliJ resolves both correctly.
+TypeScript is split across `tsconfig.app.json` (React `src/`) and
+`tsconfig.node.json` (`server/` + Vite config) so the IDE resolves both.
 
 ## Docker
 
