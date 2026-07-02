@@ -246,17 +246,25 @@ describe("unknown /api routes", () => {
   });
 });
 
-describe("GET /api/health", () => {
-  it("reports hasApiKey=false without a key", async () => {
-    const base = await start({ createMessage: null });
-    const res = await fetch(`${base}/api/health`);
-    expect(await res.json()).toEqual({ ok: true, hasApiKey: false });
-  });
+describe("health endpoints", () => {
+  it.each(["/api/health", "/api/health/live", "/api/health/ready"])(
+    "GET %s returns 200 ok",
+    async (path) => {
+      const base = await start({ createMessage: null });
+      const res = await fetch(`${base}${path}`);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true });
+    }
+  );
 
-  it("reports hasApiKey=true with a key", async () => {
+  it("does not expose API-key configuration, even when a key is present", async () => {
+    // Regression: /api/health used to serve hasApiKey to any caller — free
+    // recon for someone probing whether a deployment has a budget to burn.
     const base = await start({ createMessage: async () => JSON.stringify(insight) });
-    const res = await fetch(`${base}/api/health`);
-    expect(await res.json()).toEqual({ ok: true, hasApiKey: true });
+    for (const path of ["/api/health", "/api/health/live", "/api/health/ready"]) {
+      const body = await (await fetch(`${base}${path}`)).text();
+      expect(body).not.toContain("hasApiKey");
+    }
   });
 });
 

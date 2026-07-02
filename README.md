@@ -15,7 +15,7 @@ Chess.com data (profiles, stats, PGN archives) is fetched **client-side** — th
 
 The backend only handles:
 - `POST /api/analyze` — sends aggregated game stats to Claude and returns play-style profiles (per-IP rate limited)
-- `GET /api/health` — health check for Docker
+- `GET /api/health/live` / `GET /api/health/ready` — liveness and readiness probes (`GET /api/health` is kept as a compatibility alias); neither leaks configuration detail
 - `GET /metrics` — Prometheus metrics for dashboards and alerts (request durations, Claude latency and token usage, rate-limit and load-shed counters, concurrency saturation)
 
 The Anthropic API key stays server-side and is never exposed to the browser. `/api/analyze` is rate limited (10 requests/min per IP, in-memory) so a public deployment can't be abused to burn your API budget. Independently of the per-IP limit, a global concurrency cap (`ANALYZE_MAX_CONCURRENT`, default 4) bounds simultaneous upstream Claude calls; when saturated the endpoint sheds load immediately with `503` + `Retry-After` instead of queueing.

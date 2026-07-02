@@ -69,6 +69,8 @@ function routeLabelFor(pathname: string): string {
   switch (pathname) {
     case "/api/analyze":
     case "/api/health":
+    case "/api/health/live":
+    case "/api/health/ready":
     case "/metrics":
       return pathname;
     default:
@@ -226,8 +228,22 @@ export function createApp(deps: AppDeps): express.Express {
     })
   );
 
-  app.get("/api/health", (_req, res) => {
-    res.json({ ok: true, hasApiKey: Boolean(deps.createMessage) });
+  // Liveness: the process is up and the event loop is serving requests. The
+  // bare /api/health alias is kept for compatibility (docker-compose, older
+  // probes). Neither endpoint exposes config detail — hasApiKey used to be
+  // served here, which was free recon for attackers probing a public
+  // deployment; operators get it from the "server started" log line.
+  app.get(["/api/health", "/api/health/live"], (_req, res) => {
+    res.json({ ok: true });
+  });
+
+  // Readiness: safe for a load balancer to send traffic here. The app has no
+  // hard external dependency (running without an API key is a supported,
+  // degraded mode), so this mirrors liveness today — it exists so Kubernetes
+  // probes target stable, distinct endpoints and a future dependency (shared
+  // rate-limit store, cache) has a place to report.
+  app.get("/api/health/ready", (_req, res) => {
+    res.json({ ok: true });
   });
 
   // Prometheus scrape endpoint. Deliberately outside /api so the JSON-404
