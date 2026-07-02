@@ -232,4 +232,7 @@ They cover:
 - **Comparison orchestration** (`compare.ts`, `progressiveLoad.ts`) — `Promise.allSettled` profile resolution, precise error mapping, AbortSignal threading, the stale-run race, and AI-vs-comparison error routing, tested with injected fakes (no network, no DOM).
 - **Server** (`analyze.ts`, `rateLimit.ts`, `semaphore.ts`, `app.ts`) — request validation, model-output parsing/shape-validation, the rate limiter, the concurrency semaphore, and the `/api/analyze` endpoint end-to-end with an injected Claude stub (503 / 400 / 429 / 502 truncation & parse / 200 paths).
 
-`.github/workflows/ci.yml` runs type-checking, the unit suite, and the production build on Node 22 (matching the Docker base image) for every push and pull request.
+`.github/workflows/ci.yml` runs two jobs on every push and pull request: lint,
+type-check, unit suite, production build, and a production-dependency audit on
+Node 22 (matching the Docker base image); and a Docker job that builds the
+image and smoke-tests the booted container against `/api/health/live`.

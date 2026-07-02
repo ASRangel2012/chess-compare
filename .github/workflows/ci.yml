@@ -5,6 +5,16 @@ on:
     branches: [main]
   pull_request:
 
+# The default GITHUB_TOKEN grants write scopes; nothing here needs more than
+# reading the checkout.
+permissions:
+  contents: read
+
+# A new push to the same branch or PR supersedes the in-flight run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
@@ -20,6 +30,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Lint
+        run: npm run lint
+
       - name: Type-check
         run: npm run typecheck
 
@@ -28,3 +41,32 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      # Fail on known-vulnerable production dependencies. Dev-only advisories
+      # don't ship, so they warn in logs without breaking the build.
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build production image
+        run: docker build -t chess-compare:ci .
+
+      # Boot the real image and hit the liveness probe: catches a broken
+      # runtime stage (bad CMD, missing dist, root-only file perms) that a
+      # successful `docker build` alone would not.
+      - name: Smoke test the container
+        run: |
+          docker run -d --rm --name smoke -p 3001:3001 \
+            -e CORS_ORIGIN=http://localhost:3001 chess-compare:ci
+          ok=0
+          for i in $(seq 1 20); do
+            if curl -fsS http://127.0.0.1:3001/api/health/live; then ok=1; break; fi
+            sleep 1
+          done
+          docker logs smoke
+          docker stop smoke
+          [ "$ok" = "1" ]
