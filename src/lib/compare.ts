@@ -49,9 +49,19 @@ export interface ComparisonCore {
 
 /** Injectable data layer so the orchestration can be tested with fakes. */
 export interface CompareDeps {
-  fetchPlayerProfile: (username: string) => Promise<ChessPlayerProfile>;
-  fetchPlayerStats: (username: string) => Promise<ChessPlayerStats>;
-  fetchRecentGames: (username: string, maxGames: number) => Promise<ChessGame[]>;
+  fetchPlayerProfile: (
+    username: string,
+    signal?: AbortSignal
+  ) => Promise<ChessPlayerProfile>;
+  fetchPlayerStats: (
+    username: string,
+    signal?: AbortSignal
+  ) => Promise<ChessPlayerStats>;
+  fetchRecentGames: (
+    username: string,
+    maxGames: number,
+    signal?: AbortSignal
+  ) => Promise<ChessGame[]>;
   analyzeGames: (games: ChessGame[], username: string) => PlayerGameAnalysis;
   findCommonOpenings: (
     a: { name: string; eco: string }[],
@@ -62,7 +72,8 @@ export interface CompareDeps {
 const defaultDeps: CompareDeps = {
   fetchPlayerProfile,
   fetchPlayerStats,
-  fetchRecentGames: (username, maxGames) => fetchRecentGames(username, maxGames),
+  fetchRecentGames: (username, maxGames, signal) =>
+    fetchRecentGames(username, maxGames, undefined, { signal }),
   analyzeGames,
   findCommonOpenings,
 };
@@ -122,15 +133,17 @@ export function resolveProfileError(
 /**
  * Resolve both players' profiles, stats, recent games, and derived analysis.
  * Throws `ComparisonError` (message safe to display) on invalid input or a
- * failed profile lookup; other errors propagate as-is.
+ * failed profile lookup; other errors propagate as-is (including aborts, which
+ * are rethrown untouched so callers can drop superseded runs silently).
  */
 export async function runComparison(
   rawUsername1: string,
   rawUsername2: string,
-  opts: { maxGames?: number; deps?: CompareDeps } = {}
+  opts: { maxGames?: number; deps?: CompareDeps; signal?: AbortSignal } = {}
 ): Promise<ComparisonCore> {
   const deps = opts.deps ?? defaultDeps;
   const maxGames = opts.maxGames ?? MAX_GAMES;
+  const signal = opts.signal;
 
   const u1 = normalizeUsername(rawUsername1);
   const u2 = normalizeUsername(rawUsername2);
@@ -141,20 +154,31 @@ export async function runComparison(
   // Resolve both profiles first so a single bad username yields a precise
   // "player not found" message instead of failing the whole comparison.
   const [p1Res, p2Res] = await Promise.allSettled([
-    deps.fetchPlayerProfile(u1),
-    deps.fetchPlayerProfile(u2),
+    deps.fetchPlayerProfile(u1, signal),
+    deps.fetchPlayerProfile(u2, signal),
   ]);
 
   if (p1Res.status !== "fulfilled" || p2Res.status !== "fulfilled") {
+    // An aborted run is not a comparison failure — propagate the abort as-is
+    // so the caller can drop it silently instead of showing an error.
+    for (const res of [p1Res, p2Res]) {
+      if (
+        res.status === "rejected" &&
+        res.reason instanceof DOMException &&
+        res.reason.name === "AbortError"
+      ) {
+        throw res.reason;
+      }
+    }
     throw new ComparisonError(resolveProfileError(p1Res, p2Res, u1, u2));
   }
 
   // Profiles exist — fetch stats and recent games in parallel.
   const [stats1, stats2, games1, games2] = await Promise.all([
-    deps.fetchPlayerStats(u1),
-    deps.fetchPlayerStats(u2),
-    deps.fetchRecentGames(u1, maxGames),
-    deps.fetchRecentGames(u2, maxGames),
+    deps.fetchPlayerStats(u1, signal),
+    deps.fetchPlayerStats(u2, signal),
+    deps.fetchRecentGames(u1, maxGames, signal),
+    deps.fetchRecentGames(u2, maxGames, signal),
   ]);
 
   const analysis1 = deps.analyzeGames(games1, u1);

@@ -5,10 +5,12 @@ import { randomUUID } from "node:crypto";
 import type { Logger } from "./logger";
 import { serializeError } from "./logger";
 import type { RateLimiter } from "./rateLimit";
+import type { Semaphore } from "./semaphore";
 import {
   validateAnalyzeBody,
   buildPrompt,
   extractAnalysisJson,
+  TruncatedReplyError,
 } from "./analyze";
 
 export interface AppDeps {
@@ -19,6 +21,11 @@ export interface AppDeps {
    */
   createMessage: ((prompt: string) => Promise<string>) | null;
   rateLimiter: RateLimiter;
+  /**
+   * Bounds *global* concurrent upstream Anthropic calls (the rate limiter only
+   * bounds per-IP request rate). Saturation returns 503 + Retry-After.
+   */
+  analyzeSemaphore: Semaphore;
   logger: Logger;
   isProduction: boolean;
   /**
@@ -133,31 +140,58 @@ export function createApp(deps: AppDeps): express.Express {
       return res.status(400).json({ error: validation.error });
     }
 
-    const prompt = buildPrompt(validation.value);
+    // Bound global in-flight upstream calls. Each one can hold this socket for
+    // up to the Anthropic timeout, so when we're saturated, shed load
+    // immediately (503 + Retry-After) instead of queueing.
+    if (!deps.analyzeSemaphore.tryAcquire()) {
+      log.warn("analyze concurrency limit reached", {
+        max: deps.analyzeSemaphore.max,
+      });
+      res.setHeader("Retry-After", "10");
+      return res.status(503).json({
+        error:
+          "The AI analysis service is handling its maximum number of requests. Please retry in a few seconds.",
+      });
+    }
 
-    let text: string;
     try {
-      text = await deps.createMessage(prompt);
-    } catch (err) {
-      // Log the detail, return a generic message (mirrors the 502 parse path):
-      // SDK/network errors can carry internal detail we must not leak.
-      log.error("model request failed", { err: serializeError(err) });
-      return res.status(500).json({
-        error: "Analysis request failed. Please retry.",
-      });
-    }
+      const prompt = buildPrompt(validation.value);
 
-    const parsed = extractAnalysisJson(text);
-    if (!parsed.ok) {
-      // Upstream gave us something unusable — log why, but don't leak raw model
-      // text to the client.
-      log.warn("model returned unusable output", { reason: parsed.error });
-      return res.status(502).json({
-        error: "The AI response could not be parsed. Please retry.",
-      });
-    }
+      let text: string;
+      try {
+        text = await deps.createMessage(prompt);
+      } catch (err) {
+        if (err instanceof TruncatedReplyError) {
+          // Upstream reply was cut off at the token cap — a bad-gateway-style
+          // upstream failure with a concrete operator fix, not a generic 500.
+          log.warn("model reply truncated", { err: serializeError(err) });
+          return res.status(502).json({
+            error:
+              "The AI reply was cut off before it finished. Raise ANTHROPIC_MAX_TOKENS on the server and retry.",
+          });
+        }
+        // Log the detail, return a generic message (mirrors the 502 parse path):
+        // SDK/network errors can carry internal detail we must not leak.
+        log.error("model request failed", { err: serializeError(err) });
+        return res.status(500).json({
+          error: "Analysis request failed. Please retry.",
+        });
+      }
 
-    res.json(parsed.value);
+      const parsed = extractAnalysisJson(text);
+      if (!parsed.ok) {
+        // Upstream gave us something unusable — log why, but don't leak raw model
+        // text to the client.
+        log.warn("model returned unusable output", { reason: parsed.error });
+        return res.status(502).json({
+          error: "The AI response could not be parsed. Please retry.",
+        });
+      }
+
+      res.json(parsed.value);
+    } finally {
+      deps.analyzeSemaphore.release();
+    }
     })
   );
 

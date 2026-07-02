@@ -70,6 +70,61 @@ const input = {
   withAi: true,
 };
 
+describe("loadProgressive error routing", () => {
+  it("routes an AI failure to reportAiError while head-to-head still lands", async () => {
+    const deps: ProgressiveDeps = {
+      fetchHeadToHeadGames: async () => [] as ChessGame[],
+      analyzeHeadToHead: () => summary(),
+      fetchPlayStyleAnalysis: async () => {
+        throw new Error("model exploded");
+      },
+    };
+    const r = recorder(() => true);
+    await loadProgressive(input, deps, r.handlers);
+    await new Promise((res) => setTimeout(res, 0));
+    // The AI failure is reported via the dedicated channel — never as a
+    // comparison error — and doesn't take the head-to-head data down with it.
+    expect(r.applied).toContain("aiError");
+    expect(r.applied).toContain("h2h");
+    expect(r.applied).not.toContain("insights");
+  });
+
+  it("does not report an aborted AI request as an error", async () => {
+    const deps: ProgressiveDeps = {
+      fetchHeadToHeadGames: async () => [] as ChessGame[],
+      analyzeHeadToHead: () => summary(),
+      fetchPlayStyleAnalysis: async () => {
+        throw new DOMException("The operation was aborted.", "AbortError");
+      },
+    };
+    const r = recorder(() => true);
+    await loadProgressive(input, deps, r.handlers);
+    await new Promise((res) => setTimeout(res, 0));
+    expect(r.applied).not.toContain("aiError");
+  });
+
+  it("passes the run's signal to both fetch deps", async () => {
+    const controller = new AbortController();
+    const seen: (AbortSignal | undefined)[] = [];
+    const deps: ProgressiveDeps = {
+      fetchHeadToHeadGames: async (_1, _2, signal) => {
+        seen.push(signal);
+        return [];
+      },
+      analyzeHeadToHead: () => summary(),
+      fetchPlayStyleAnalysis: async (_a, _b, _n1, _n2, signal) => {
+        seen.push(signal);
+        return insight();
+      },
+    };
+    const r = recorder(() => true);
+    await loadProgressive({ ...input, signal: controller.signal }, deps, r.handlers);
+    await new Promise((res) => setTimeout(res, 0));
+    expect(seen).toHaveLength(2);
+    expect(seen.every((s) => s === controller.signal)).toBe(true);
+  });
+});
+
 describe("loadProgressive stale-run race", () => {
   it("applies head-to-head and insights while the run stays current", async () => {
     const deps: ProgressiveDeps = {

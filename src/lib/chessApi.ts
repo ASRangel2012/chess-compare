@@ -17,20 +17,42 @@ const MAX_RATE_LIMIT_RETRIES = 3;
 /** How many monthly archives the head-to-head scan looks back over. */
 export const HEAD_TO_HEAD_MAX_ARCHIVES = 48;
 
+/** True when `err` is an abort (caller cancelled) rather than a real failure. */
+export function isAbortError(err: unknown): boolean {
+  return err instanceof DOMException && err.name === "AbortError";
+}
+
 interface FetchOptions {
   /**
-   * Memoize the resolved JSON by URL. Safe for immutable resources — the
-   * archives list and any *completed* monthly archive never change. The
-   * current (in-progress) month is fetched with `cache: false` so new games
-   * show up on a re-run.
+   * Memoize the resolved JSON by cache key. Safe for immutable resources —
+   * any *completed* monthly archive never changes. The current calendar
+   * month's archive is fetched with `cache: false` so new games show up on a
+   * re-run.
    */
   cache?: boolean;
+  /**
+   * Cache under this key instead of the URL. Used to give the archives list a
+   * key that embeds the current year-month, so a month rollover mid-session
+   * naturally invalidates the stale list.
+   */
+  cacheKey?: string;
+  /** Cancels the request. Aborts are propagated as-is (never mapped to a user-facing error here). */
+  signal?: AbortSignal;
+}
+
+/** Injectable clock (ms since epoch) so month-boundary logic is testable. */
+type Clock = () => number;
+
+interface ScanOptions {
+  signal?: AbortSignal;
+  now?: Clock;
 }
 
 /**
- * In-memory response cache keyed by URL. We store the in-flight Promise (not
- * just the resolved value) so concurrent callers for the same URL share a
- * single network request. Failed requests are evicted so errors aren't sticky.
+ * In-memory response cache keyed by URL (or an explicit cacheKey). We store the
+ * in-flight Promise (not just the resolved value) so concurrent callers for the
+ * same URL share a single network request. Failed requests — including aborted
+ * ones — are evicted so errors aren't sticky.
  *
  * Bounded with simple LRU eviction so a long session comparing many players
  * can't grow the map without limit. Map preserves insertion order, so the first
@@ -44,18 +66,18 @@ export function jsonCacheSize(): number {
   return jsonCache.size;
 }
 
-function cacheGet(url: string): Promise<unknown> | undefined {
-  const cached = jsonCache.get(url);
+function cacheGet(key: string): Promise<unknown> | undefined {
+  const cached = jsonCache.get(key);
   if (cached !== undefined) {
     // Move to most-recently-used (delete + re-set puts it at the tail).
-    jsonCache.delete(url);
-    jsonCache.set(url, cached);
+    jsonCache.delete(key);
+    jsonCache.set(key, cached);
   }
   return cached;
 }
 
-function cacheSet(url: string, promise: Promise<unknown>): void {
-  jsonCache.set(url, promise);
+function cacheSet(key: string, promise: Promise<unknown>): void {
+  jsonCache.set(key, promise);
   if (jsonCache.size <= JSON_CACHE_MAX) return;
   // Evict least-recently-used entries (oldest insertion order) until in bounds.
   for (const lru of jsonCache.keys()) {
@@ -66,12 +88,34 @@ function cacheSet(url: string, promise: Promise<unknown>): void {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function requestJson<T>(url: string): Promise<T> {
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : new DOMException("The operation was aborted.", "AbortError");
+  }
+}
+
+async function requestJson<T>(url: string, signal?: AbortSignal): Promise<T> {
   for (let attempt = 0; ; attempt++) {
+    throwIfAborted(signal);
+    // Combine the caller's signal with the per-request timeout: either one
+    // aborts the fetch. Prefer AbortSignal.any; fall back to manual chaining.
     const controller = new AbortController();
+    let fetchSignal = controller.signal;
+    let unchain = () => {};
+    if (signal) {
+      if (typeof AbortSignal.any === "function") {
+        fetchSignal = AbortSignal.any([signal, controller.signal]);
+      } else {
+        const onAbort = () => controller.abort(signal.reason);
+        signal.addEventListener("abort", onAbort, { once: true });
+        unchain = () => signal.removeEventListener("abort", onAbort);
+      }
+    }
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
-      const res = await fetch(url, { signal: controller.signal });
+      const res = await fetch(url, { signal: fetchSignal });
 
       // Honor Chess.com rate limiting with a bounded backoff before giving up.
       if (res.status === 429 && attempt < MAX_RATE_LIMIT_RETRIES) {
@@ -94,26 +138,45 @@ async function requestJson<T>(url: string): Promise<T> {
       return (await res.json()) as T;
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") {
+        // Caller cancelled: propagate the abort untouched so upper layers can
+        // recognize it and stay silent — it must never surface as a user error.
+        if (signal?.aborted) throw err;
+        // Otherwise it was our own timeout.
         throw new Error("Chess.com request timed out. Please try again.");
       }
       throw err;
     } finally {
       clearTimeout(timer);
+      unchain();
     }
   }
 }
 
 async function fetchJson<T>(url: string, opts: FetchOptions = {}): Promise<T> {
-  if (!opts.cache) return requestJson<T>(url);
+  if (!opts.cache) return requestJson<T>(url, opts.signal);
 
-  const cached = cacheGet(url);
+  const key = opts.cacheKey ?? url;
+  const cached = cacheGet(key);
   if (cached) return cached as Promise<T>;
 
-  const promise = requestJson<T>(url);
-  cacheSet(url, promise);
-  // Don't cache failures — let the next call retry.
-  promise.catch(() => jsonCache.delete(url));
+  const promise = requestJson<T>(url, opts.signal);
+  cacheSet(key, promise);
+  // Don't cache failures — aborted or errored requests are evicted so the next
+  // call retries instead of inheriting a poisoned promise.
+  promise.catch(() => jsonCache.delete(key));
   return promise;
+}
+
+/** "…/games/YYYY/MM" -> "YYYY-MM", or null when the URL has no month suffix. */
+export function archiveYearMonth(url: string): string | null {
+  const m = url.match(/\/(\d{4})\/(\d{2})\/?$/);
+  return m ? `${m[1]}-${m[2]}` : null;
+}
+
+/** The current calendar year-month ("YYYY-MM", UTC) per the injected clock. */
+export function currentYearMonth(now: Clock = Date.now): string {
+  const d = new Date(now());
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
 /**
@@ -134,13 +197,24 @@ async function fetchJson<T>(url: string, opts: FetchOptions = {}): Promise<T> {
 async function scanArchives(
   archiveUrls: string[],
   concurrency: number,
-  onMonth: (games: ChessGame[], index: number) => boolean
+  onMonth: (games: ChessGame[], index: number) => boolean,
+  opts: ScanOptions = {}
 ): Promise<void> {
+  const nowMonth = currentYearMonth(opts.now);
   for (let i = 0; i < archiveUrls.length; i += concurrency) {
+    // Aborted between batches: stop before issuing any further requests.
+    throwIfAborted(opts.signal);
     const batch = archiveUrls.slice(i, i + concurrency);
-    // index 0 is the current, still-changing month — don't cache it.
+    // Only the current calendar month is still changing — don't cache it. Keyed
+    // on the URL's /YYYY/MM suffix (not list position) so a stale archives list
+    // after a month rollover can't freeze last month's partial data forever.
     const months = await Promise.all(
-      batch.map((url, j) => fetchMonthlyGames(url, { cache: i + j !== 0 }))
+      batch.map((url) =>
+        fetchMonthlyGames(url, {
+          cache: archiveYearMonth(url) !== nowMonth,
+          signal: opts.signal,
+        })
+      )
     );
     for (let j = 0; j < months.length; j++) {
       if (!onMonth(months[j], i + j)) return;
@@ -149,28 +223,40 @@ async function scanArchives(
 }
 
 export async function fetchPlayerProfile(
-  username: string
+  username: string,
+  signal?: AbortSignal
 ): Promise<ChessPlayerProfile> {
   return fetchJson<ChessPlayerProfile>(
-    `${BASE_URL}/player/${encodeURIComponent(username)}`
+    `${BASE_URL}/player/${encodeURIComponent(username)}`,
+    { signal }
   );
 }
 
 export async function fetchPlayerStats(
-  username: string
+  username: string,
+  signal?: AbortSignal
 ): Promise<ChessPlayerStats> {
   return fetchJson<ChessPlayerStats>(
-    `${BASE_URL}/player/${encodeURIComponent(username)}/stats`
+    `${BASE_URL}/player/${encodeURIComponent(username)}/stats`,
+    { signal }
   );
 }
 
-export async function fetchArchives(username: string): Promise<string[]> {
-  // Archives list is effectively immutable within a session — cache it so the
-  // duplicate lookup from the head-to-head scan is a free hit.
-  const data = await fetchJson<ArchivesResponse>(
-    `${BASE_URL}/player/${encodeURIComponent(username)}/games/archives`,
-    { cache: true }
-  );
+export async function fetchArchives(
+  username: string,
+  opts: ScanOptions = {}
+): Promise<string[]> {
+  // The archives list gains a new entry when a month rolls over, so it is only
+  // immutable *within* a calendar month. Embedding the current year-month in
+  // the cache key makes a rollover mid-session a natural cache miss (the stale
+  // entry ages out of the LRU), while repeat lookups inside the month — e.g.
+  // the duplicate lookup from the head-to-head scan — stay free.
+  const url = `${BASE_URL}/player/${encodeURIComponent(username)}/games/archives`;
+  const data = await fetchJson<ArchivesResponse>(url, {
+    cache: true,
+    cacheKey: `${url}#${currentYearMonth(opts.now)}`,
+    signal: opts.signal,
+  });
   return data.archives;
 }
 
@@ -185,16 +271,26 @@ export async function fetchMonthlyGames(
 export async function fetchRecentGames(
   username: string,
   maxGames = 50,
-  concurrency = ARCHIVE_CONCURRENCY
+  concurrency = ARCHIVE_CONCURRENCY,
+  opts: ScanOptions = {}
 ): Promise<ChessGame[]> {
-  const archives = await fetchArchives(username);
+  const archives = await fetchArchives(username, opts);
   const recentArchives = [...archives].reverse(); // most recent month first
   const games: ChessGame[] = [];
 
-  await scanArchives(recentArchives, concurrency, (monthly) => {
-    games.push(...[...monthly].reverse());
-    return games.length < maxGames; // keep scanning until we have enough
-  });
+  await scanArchives(
+    recentArchives,
+    concurrency,
+    (monthly) => {
+      // Newest game first within the month. A loop (not push(...spread)) so a
+      // huge month can't blow the engine's max-argument-count limit.
+      for (let g = monthly.length - 1; g >= 0; g--) {
+        games.push(monthly[g]);
+      }
+      return games.length < maxGames; // keep scanning until we have enough
+    },
+    opts
+  );
 
   return games.slice(0, maxGames);
 }
@@ -262,30 +358,36 @@ export async function fetchHeadToHeadGames(
   username1: string,
   username2: string,
   maxGames = 100,
-  maxArchives = HEAD_TO_HEAD_MAX_ARCHIVES
+  maxArchives = HEAD_TO_HEAD_MAX_ARCHIVES,
+  opts: ScanOptions = {}
 ): Promise<ChessGame[]> {
   const u1 = username1.toLowerCase();
   const u2 = username2.toLowerCase();
-  const archives = await fetchArchives(u1);
+  const archives = await fetchArchives(u1, opts);
   const recentArchives = [...archives].reverse().slice(0, maxArchives);
   const games: ChessGame[] = [];
   const seen = new Set<string>();
 
-  await scanArchives(recentArchives, ARCHIVE_CONCURRENCY, (monthly) => {
-    for (const game of monthly) {
-      // Only standard chess — exclude chess960 and other variants.
-      if ((game.rules ?? "chess") !== "chess") continue;
-      const white = game.white.username.toLowerCase();
-      const black = game.black.username.toLowerCase();
-      const isMatch =
-        (white === u1 && black === u2) || (white === u2 && black === u1);
-      if (isMatch && !seen.has(game.url)) {
-        seen.add(game.url);
-        games.push(game);
+  await scanArchives(
+    recentArchives,
+    ARCHIVE_CONCURRENCY,
+    (monthly) => {
+      for (const game of monthly) {
+        // Only standard chess — exclude chess960 and other variants.
+        if ((game.rules ?? "chess") !== "chess") continue;
+        const white = game.white.username.toLowerCase();
+        const black = game.black.username.toLowerCase();
+        const isMatch =
+          (white === u1 && black === u2) || (white === u2 && black === u1);
+        if (isMatch && !seen.has(game.url)) {
+          seen.add(game.url);
+          games.push(game);
+        }
       }
-    }
-    return games.length < maxGames;
-  });
+      return games.length < maxGames;
+    },
+    opts
+  );
 
   return games.sort((a, b) => b.end_time - a.end_time).slice(0, maxGames);
 }

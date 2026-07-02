@@ -14,9 +14,15 @@ import type {
  * tested without a DOM. The hook supplies `isCurrent`, which returns false once
  * a newer compare() run has started; every state mutation is gated on it so a
  * late-resolving promise from an old run can't bleed stale data into the new one.
+ * The hook also supplies an AbortSignal so a superseded run's in-flight network
+ * requests are actually cancelled, not just ignored.
  */
 export interface ProgressiveDeps {
-  fetchHeadToHeadGames: (u1: string, u2: string) => Promise<ChessGame[]>;
+  fetchHeadToHeadGames: (
+    u1: string,
+    u2: string,
+    signal?: AbortSignal
+  ) => Promise<ChessGame[]>;
   analyzeHeadToHead: (
     games: ChessGame[],
     u1: string,
@@ -26,7 +32,8 @@ export interface ProgressiveDeps {
     analysis1: PlayerGameAnalysis,
     analysis2: PlayerGameAnalysis,
     name1: string,
-    name2: string
+    name2: string,
+    signal?: AbortSignal
   ) => Promise<PlayStyleInsight>;
 }
 
@@ -37,6 +44,7 @@ export interface ProgressiveHandlers {
   setLoadingHeadToHead: (loading: boolean) => void;
   applyInsights: (insights: PlayStyleInsight) => void;
   setAnalyzingStyle: (analyzing: boolean) => void;
+  /** AI-analysis failures only — never comparison failures. */
   reportAiError: (message: string) => void;
   logWarn: (message: string, detail?: unknown) => void;
   logError: (message: string, detail?: unknown) => void;
@@ -48,6 +56,12 @@ export interface ProgressiveInput {
   analysis1: PlayerGameAnalysis;
   analysis2: PlayerGameAnalysis;
   withAi: boolean;
+  /** Cancels this run's in-flight requests when a newer run supersedes it. */
+  signal?: AbortSignal;
+}
+
+function isAbort(err: unknown): boolean {
+  return err instanceof DOMException && err.name === "AbortError";
 }
 
 export async function loadProgressive(
@@ -55,18 +69,19 @@ export async function loadProgressive(
   deps: ProgressiveDeps,
   h: ProgressiveHandlers
 ): Promise<void> {
-  const { u1, u2, analysis1, analysis2, withAi } = input;
+  const { u1, u2, analysis1, analysis2, withAi, signal } = input;
 
   // Head-to-head is best-effort and runs in the background: a failed archive
   // scan must not fail the main comparison, but should still be visible to a dev.
   h.setLoadingHeadToHead(true);
   void deps
-    .fetchHeadToHeadGames(u1, u2)
+    .fetchHeadToHeadGames(u1, u2, signal)
     .then((games) => {
       if (!h.isCurrent()) return; // superseded — drop it
       h.applyHeadToHead(deps.analyzeHeadToHead(games, u1, u2));
     })
     .catch((err) => {
+      if (isAbort(err)) return; // superseded run cancelled its own fetches
       h.logWarn("head-to-head scan failed; showing comparison without it", err);
     })
     .finally(() => {
@@ -80,17 +95,21 @@ export async function loadProgressive(
         analysis1,
         analysis2,
         u1,
-        u2
+        u2,
+        signal
       );
       if (h.isCurrent()) h.applyInsights(insights);
     } catch (err) {
-      h.logError("AI play style analysis failed", err);
-      if (h.isCurrent()) {
-        h.reportAiError(
-          err instanceof Error
-            ? `Stats loaded, but AI analysis failed: ${err.message}`
-            : "AI analysis failed"
-        );
+      // An abort means this run was superseded — never report it as an error.
+      if (!isAbort(err)) {
+        h.logError("AI play style analysis failed", err);
+        if (h.isCurrent()) {
+          h.reportAiError(
+            err instanceof Error
+              ? `Stats loaded, but AI analysis failed: ${err.message}`
+              : "AI analysis failed"
+          );
+        }
       }
     } finally {
       if (h.isCurrent()) h.setAnalyzingStyle(false);

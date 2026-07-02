@@ -14,8 +14,17 @@ export async function fetchPlayStyleAnalysis(
   player1Analysis: PlayerGameAnalysis,
   player2Analysis: PlayerGameAnalysis,
   player1Name: string,
-  player2Name: string
+  player2Name: string,
+  signal?: AbortSignal
 ): Promise<PlayStyleInsight> {
+  // Either the caller's signal (a superseded run) or the timeout cancels the
+  // request. AbortSignal.any is available in all browsers that run this app.
+  const timeoutSignal = AbortSignal.timeout(ANALYZE_TIMEOUT_MS);
+  const fetchSignal =
+    signal && typeof AbortSignal.any === "function"
+      ? AbortSignal.any([signal, timeoutSignal])
+      : (signal ?? timeoutSignal);
+
   let res: Response;
   try {
     res = await fetch("/api/analyze", {
@@ -25,9 +34,14 @@ export async function fetchPlayStyleAnalysis(
         player1: { name: player1Name, analysis: player1Analysis },
         player2: { name: player2Name, analysis: player2Analysis },
       }),
-      signal: AbortSignal.timeout(ANALYZE_TIMEOUT_MS),
+      signal: fetchSignal,
     });
   } catch (err) {
+    // A caller-initiated abort is not an error — rethrow it untouched so the
+    // hook can drop it silently.
+    if (signal?.aborted && err instanceof DOMException && err.name === "AbortError") {
+      throw err;
+    }
     if (
       err instanceof DOMException &&
       (err.name === "TimeoutError" || err.name === "AbortError")

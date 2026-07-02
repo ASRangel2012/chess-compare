@@ -4,6 +4,7 @@ import {
   IconChevronLeft,
   IconChevronRight,
   IconPlayerTrackNext,
+  IconAlertTriangle,
 } from "@tabler/icons-react";
 import { replayGame, pieceGlyph } from "../lib/chess";
 
@@ -15,13 +16,19 @@ interface GameViewerProps {
   blackLabel?: string;
 }
 
+/** "12. Nxe5" / "12… Nxe5" style label for a ply, or "Start" for ply 0. */
+function plyLabel(ply: { san: string | null; moveNumber: number; movedBy: "w" | "b" | null }): string {
+  if (!ply.san) return "Start";
+  return `${ply.moveNumber}${ply.movedBy === "b" ? "…" : "."} ${ply.san}`;
+}
+
 export function GameViewer({
   pgn,
   orientation = "white",
   whiteLabel = "White",
   blackLabel = "Black",
 }: GameViewerProps) {
-  const plies = useMemo(() => replayGame(pgn), [pgn]);
+  const { plies, truncated, failedSan } = useMemo(() => replayGame(pgn), [pgn]);
   const [index, setIndex] = useState(0);
 
   // Reset to the start whenever a different game is loaded.
@@ -34,6 +41,9 @@ export function GameViewer({
   const safeIndex = clamp(index);
   const current = plies[safeIndex];
   const lastMove = current.lastMove;
+
+  // The move number the replay stopped at (the first move we could NOT apply).
+  const stoppedAtMove = Math.floor(maxIndex / 2) + 1;
 
   // Render order: rank 8 -> 1 and file a -> h (flipped for black orientation).
   const ranks = orientation === "white" ? [7, 6, 5, 4, 3, 2, 1, 0] : [0, 1, 2, 3, 4, 5, 6, 7];
@@ -49,11 +59,17 @@ export function GameViewer({
     }
   };
 
+  const sideToMove = current.movedBy === "w" ? "Black" : "White";
+  const boardLabel =
+    safeIndex === 0
+      ? "Starting position, White to move"
+      : `Position after ${plyLabel(current)}, ${sideToMove} to move`;
+
   return (
     <div className="game-viewer" tabIndex={0} onKeyDown={onKeyDown}>
       <div className="game-viewer-board-col">
         <div className="board-edge-label">{orientation === "white" ? blackLabel : whiteLabel}</div>
-        <div className="chess-board">
+        <div className="chess-board" role="img" aria-label={boardLabel}>
           {ranks.map((r) =>
             files.map((f) => {
               const sq = r * 8 + f;
@@ -82,6 +98,12 @@ export function GameViewer({
           )}
         </div>
         <div className="board-edge-label">{orientation === "white" ? whiteLabel : blackLabel}</div>
+        {truncated && (
+          <div className="replay-warning" role="status">
+            <IconAlertTriangle size={14} />
+            Replay stopped at move {stoppedAtMove} — couldn&apos;t parse {failedSan}
+          </div>
+        )}
       </div>
 
       <div className="game-viewer-side">
@@ -102,6 +124,11 @@ export function GameViewer({
             <IconPlayerTrackNext size={16} />
           </button>
         </div>
+
+        {/* Announce the current move to screen readers as the user steps through. */}
+        <span className="visually-hidden" aria-live="polite">
+          {plyLabel(current)}
+        </span>
 
         <ol className="move-list">
           {plies.slice(1).map((ply, i) => {

@@ -176,4 +176,38 @@ describe("runComparison", () => {
       "stats exploded"
     );
   });
+
+  it("propagates an aborted profile fetch as the abort, not a ComparisonError", async () => {
+    // The hook must be able to recognize a cancelled run and stay silent; if
+    // the abort were wrapped in ComparisonError it would show as a user error.
+    const abort = new DOMException("The operation was aborted.", "AbortError");
+    const deps = makeDeps({
+      fetchPlayerProfile: async () => {
+        throw abort;
+      },
+    });
+    await expect(runComparison("alice", "bob", { deps })).rejects.toBe(abort);
+  });
+
+  it("threads its AbortSignal through to every fetch dep", async () => {
+    const controller = new AbortController();
+    const seen: (AbortSignal | undefined)[] = [];
+    const deps = makeDeps({
+      fetchPlayerProfile: async (u, signal) => {
+        seen.push(signal);
+        return profile(u);
+      },
+      fetchPlayerStats: async (_u, signal) => {
+        seen.push(signal);
+        return stats();
+      },
+      fetchRecentGames: async (_u, _m, signal) => {
+        seen.push(signal);
+        return [];
+      },
+    });
+    await runComparison("alice", "bob", { deps, signal: controller.signal });
+    expect(seen).toHaveLength(6); // 2 profiles + 2 stats + 2 recent-games
+    expect(seen.every((s) => s === controller.signal)).toBe(true);
+  });
 });
