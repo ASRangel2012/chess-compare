@@ -192,6 +192,7 @@ docker run -p 3001:3001 -e ANTHROPIC_API_KEY=sk-ant-... chess-compare
 | `npm start` | Run production server (serves UI + API) |
 | `npm run prod` | Build + start (used by IntelliJ **Production** run config) |
 | `npm run typecheck` | Type-check the project (`tsc -b`) |
+| `npm run lint` | ESLint (flat config) over client, server, shared, and scripts |
 | `npm test` | Run the Vitest unit suite |
 | `npm run test:watch` | Run Vitest in watch mode |
 

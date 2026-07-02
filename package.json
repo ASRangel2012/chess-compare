@@ -14,6 +14,7 @@
     "prod": "npm run build && npm run start",
     "preview": "vite preview",
     "typecheck": "tsc -b",
+    "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest"
   },
@@ -27,6 +28,7 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.0",
     "@types/node": "^22.13.10",
@@ -35,9 +37,12 @@
     "@vitejs/plugin-react": "^4.3.4",
     "concurrently": "^9.1.2",
     "esbuild": "^0.25.0",
+    "eslint": "^10.6.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
     "kill-port": "^2.0.1",
     "tsx": "^4.19.3",
     "typescript": "^5.7.3",
+    "typescript-eslint": "^8.62.1",
     "vite": "^6.2.0",
     "vitest": "^3.2.4"
   },
