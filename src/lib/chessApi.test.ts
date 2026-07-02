@@ -9,6 +9,9 @@ import {
   fetchArchives,
   jsonCacheSize,
   JSON_CACHE_MAX,
+  archiveYearMonth,
+  currentYearMonth,
+  isAbortError,
 } from "./chessApi";
 import type { ChessPlayerStats } from "./types";
 
@@ -245,6 +248,174 @@ describe("chessApi network resilience", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Cancellation: a superseded run's AbortSignal must stop the scan (no further
+// fetches) and must not poison the promise cache for the next run.
+// ---------------------------------------------------------------------------
+
+describe("chessApi cancellation", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  /** fetch mock: archives resolve instantly; monthly requests hang until aborted. */
+  function installAbortableFetch(user: string, months: number) {
+    const urls = archiveUrls(user, months);
+    let monthlyCalls = 0;
+    const fetchMock = vi.fn((input: string | URL, opts?: { signal?: AbortSignal }) => {
+      const url = String(input);
+      if (url.endsWith("/games/archives")) {
+        return Promise.resolve(jsonResponse({ archives: urls }));
+      }
+      monthlyCalls++;
+      return new Promise<Response>((_resolve, reject) => {
+        opts?.signal?.addEventListener("abort", () =>
+          reject(new DOMException("The operation was aborted.", "AbortError"))
+        );
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return { fetchMock, monthlyCallCount: () => monthlyCalls };
+  }
+
+  it("stops a scan mid-batch on abort and issues no further fetches", async () => {
+    const { monthlyCallCount } = installAbortableFetch("erin", 12);
+    const controller = new AbortController();
+
+    // Concurrency 3 over 12 archives: without the abort this would need 4 batches.
+    const pending = fetchRecentGames("erin", 500, 3, { signal: controller.signal });
+    // Let the first batch of monthly requests get issued...
+    await new Promise((r) => setTimeout(r, 10));
+    expect(monthlyCallCount()).toBe(3);
+
+    controller.abort();
+    await expect(pending).rejects.toSatisfy(isAbortError);
+
+    // ...and after the abort settles, no further batch was ever started.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(monthlyCallCount()).toBe(3);
+  });
+
+  it("does not poison the promise cache with aborted requests", async () => {
+    const user = "frank-abort";
+    const urls = archiveUrls(user, 1);
+    let archiveCalls = 0;
+    const fetchMock = vi.fn((input: string | URL, opts?: { signal?: AbortSignal }) => {
+      const url = String(input);
+      if (url.endsWith("/games/archives")) {
+        archiveCalls++;
+        if (archiveCalls === 1) {
+          // First lookup hangs until aborted.
+          return new Promise<Response>((_resolve, reject) => {
+            opts?.signal?.addEventListener("abort", () =>
+              reject(new DOMException("The operation was aborted.", "AbortError"))
+            );
+          });
+        }
+        return Promise.resolve(jsonResponse({ archives: urls }));
+      }
+      return Promise.resolve(jsonResponse({ games: [] }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const controller = new AbortController();
+    const first = fetchArchives(user, { signal: controller.signal });
+    controller.abort();
+    await expect(first).rejects.toSatisfy(isAbortError);
+
+    // The aborted promise was evicted (eviction-on-failure), so a retry issues
+    // a fresh request and succeeds instead of inheriting the dead promise.
+    const retry = await fetchArchives(user);
+    expect(retry).toEqual(urls);
+    expect(archiveCalls).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Month-boundary caching: "current month" is decided by the archive URL's
+// /YYYY/MM suffix against an injected clock, and the archives list itself is
+// keyed by year-month so a rollover mid-session invalidates it.
+// ---------------------------------------------------------------------------
+
+describe("month-boundary cache behavior", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("archiveYearMonth parses the /YYYY/MM suffix", () => {
+    expect(archiveYearMonth(`${BASE}/player/x/games/2026/07`)).toBe("2026-07");
+    expect(archiveYearMonth(`${BASE}/player/x/games/2026/07/`)).toBe("2026-07");
+    expect(archiveYearMonth(`${BASE}/player/x/games/archives`)).toBeNull();
+  });
+
+  it("currentYearMonth reflects the injected clock (UTC)", () => {
+    expect(currentYearMonth(() => Date.UTC(2020, 4, 15))).toBe("2020-05");
+    expect(currentYearMonth(() => Date.UTC(2020, 11, 31, 23, 59))).toBe("2020-12");
+  });
+
+  it("refetches only the current calendar month on a re-scan", async () => {
+    const user = "grace-months";
+    const urls = archiveUrls(user, 5); // 2020/01 .. 2020/05
+    const monthlyByUrl = new Map<string, number>();
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url.endsWith("/games/archives")) return jsonResponse({ archives: urls });
+      monthlyByUrl.set(url, (monthlyByUrl.get(url) ?? 0) + 1);
+      return jsonResponse({ games: [] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    // Clock says May 2020 — so 2020/05 is the live month, 01..04 are closed.
+    const now = () => Date.UTC(2020, 4, 20);
+    await fetchRecentGames(user, 500, 6, { now });
+    await fetchRecentGames(user, 500, 6, { now });
+
+    expect(monthlyByUrl.get(`${BASE}/player/${user}/games/2020/05`)).toBe(2); // live: refetched
+    for (const m of ["01", "02", "03", "04"]) {
+      expect(monthlyByUrl.get(`${BASE}/player/${user}/games/2020/${m}`)).toBe(1); // closed: cached
+    }
+  });
+
+  it("caches every month once none of them is current (post-rollover safety)", async () => {
+    const user = "heidi-rollover";
+    const urls = archiveUrls(user, 3);
+    let monthlyCalls = 0;
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url.endsWith("/games/archives")) return jsonResponse({ archives: urls });
+      monthlyCalls++;
+      return jsonResponse({ games: [] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    // Clock is June 2020: the newest archive (2020/03) is NOT the live month,
+    // so — unlike the old index-0 rule — it is safely cacheable.
+    const now = () => Date.UTC(2020, 5, 2);
+    await fetchRecentGames(user, 500, 6, { now });
+    await fetchRecentGames(user, 500, 6, { now });
+    expect(monthlyCalls).toBe(3);
+  });
+
+  it("invalidates the archives list when the month rolls over mid-session", async () => {
+    const user = "ivan-list";
+    let archiveCalls = 0;
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url.endsWith("/games/archives")) {
+        archiveCalls++;
+        return jsonResponse({ archives: archiveUrls(user, 2) });
+      }
+      return jsonResponse({ games: [] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const may = () => Date.UTC(2020, 4, 31, 23, 0);
+    const june = () => Date.UTC(2020, 5, 1, 1, 0);
+
+    await fetchArchives(user, { now: may });
+    await fetchArchives(user, { now: may }); // same month — cache hit
+    expect(archiveCalls).toBe(1);
+
+    await fetchArchives(user, { now: june }); // rollover — cache miss, refetch
+    expect(archiveCalls).toBe(2);
+  });
+});
 
 describe("jsonCache eviction (LRU cap)", () => {
   afterEach(() => vi.restoreAllMocks());

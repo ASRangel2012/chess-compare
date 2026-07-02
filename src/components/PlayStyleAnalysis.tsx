@@ -12,6 +12,8 @@ interface PlayStyleAnalysisProps {
   player2Name: string;
   insights: PlayStyleInsight | null;
   loading: boolean;
+  /** AI-analysis failure message (comparison results are unaffected). */
+  error?: string | null;
   onRetry: () => void;
 }
 
@@ -20,6 +22,7 @@ export function PlayStyleAnalysis({
   player2Name,
   insights,
   loading,
+  error,
   onRetry,
 }: PlayStyleAnalysisProps) {
   if (loading) {
@@ -39,7 +42,8 @@ export function PlayStyleAnalysis({
         <div className="empty-state">
           <IconSparkles size={40} />
           <p>
-            AI analysis requires the backend server with an Anthropic API key.
+            {error ??
+              "AI analysis requires the backend server with an Anthropic API key."}
           </p>
           <button
             type="button"

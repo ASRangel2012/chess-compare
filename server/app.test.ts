@@ -3,8 +3,9 @@ import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createApp, type AppDeps } from "./app";
 import { createRateLimiter, type RateLimiter } from "./rateLimit";
+import { createSemaphore } from "./semaphore";
 import type { Logger } from "./logger";
-import type { PlayerGameAnalysis } from "./analyze";
+import { TruncatedReplyError, type PlayerGameAnalysis } from "./analyze";
 
 // A no-op logger so tests don't spam stdout.
 const noopLogger: Logger = {
@@ -54,6 +55,7 @@ async function start(overrides: Partial<AppDeps>): Promise<string> {
   const app = createApp({
     createMessage: null,
     rateLimiter: createRateLimiter({ windowMs: 60_000, max: 10 }),
+    analyzeSemaphore: createSemaphore(4),
     logger: noopLogger,
     isProduction: false,
     trustProxy: false,
@@ -158,6 +160,65 @@ describe("POST /api/analyze", () => {
     const payload = (await res.json()) as { error: string };
     expect(payload.error).toBe("Internal error. Please retry.");
     expect(payload.error).not.toContain(secret);
+  });
+
+  it("502 with the actionable message when the model reply is truncated", async () => {
+    const base = await start({
+      createMessage: async () => {
+        throw new TruncatedReplyError(
+          "Model reply hit the 4096-token cap before finishing."
+        );
+      },
+    });
+    const res = await post(base, validBody());
+    expect(res.status).toBe(502);
+    const payload = (await res.json()) as { error: string };
+    expect(payload.error).toMatch(/ANTHROPIC_MAX_TOKENS/);
+    // The internal token-count detail is not echoed verbatim.
+    expect(payload.error).not.toContain("4096");
+  });
+
+  it("503 with Retry-After when the analyze concurrency limit is saturated", async () => {
+    // A createMessage we control: the first request parks inside the model
+    // call, holding the single semaphore slot, while the second arrives.
+    let releaseFirst!: () => void;
+    const parked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const base = await start({
+      analyzeSemaphore: createSemaphore(1),
+      createMessage: async () => {
+        await parked;
+        return JSON.stringify(insight);
+      },
+    });
+
+    const first = post(base, validBody());
+    // Give the first request time to reach the model call and take the slot.
+    await new Promise((r) => setTimeout(r, 50));
+    const second = await post(base, validBody());
+    expect(second.status).toBe(503);
+    expect(second.headers.get("Retry-After")).toBeTruthy();
+    const payload = (await second.json()) as { error: string };
+    expect(payload.error).toMatch(/retry/i);
+
+    // Unpark the first request: it completes fine and frees the slot.
+    releaseFirst();
+    expect((await first).status).toBe(200);
+    expect((await post(base, validBody())).status).toBe(200);
+  });
+
+  it("releases the concurrency slot when the model call fails", async () => {
+    const base = await start({
+      analyzeSemaphore: createSemaphore(1),
+      createMessage: async () => {
+        throw new Error("boom");
+      },
+    });
+    expect((await post(base, validBody())).status).toBe(500);
+    // The failed call must not leak its slot — the next request gets through.
+    const res = await post(base, validBody());
+    expect(res.status).toBe(500); // still the stub error, NOT a 503
   });
 
   it("429 once the per-IP rate limit is exceeded", async () => {

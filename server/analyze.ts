@@ -19,13 +19,47 @@ export type { AnalyzeBody, PlayerGameAnalysis, PlayStyleInsight };
 export type Result<T> = { ok: true; value: T } | { ok: false; error: string };
 
 /**
+ * The model's reply hit the max_tokens cap before finishing. A distinct,
+ * recognizable error so the /api/analyze route can map it to a 502 with an
+ * actionable message (raise ANTHROPIC_MAX_TOKENS) instead of a generic 500.
+ */
+export class TruncatedReplyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TruncatedReplyError";
+  }
+}
+
+/**
+ * The subset of PlayerGameAnalysis the prompt actually reads — and therefore
+ * everything the server validates and requires. The client's wire type
+ * (AnalyzeBody) also carries `username` and `commonOpenings`, but the server
+ * never reads them, so it must not require them.
+ */
+export type PromptPlayerAnalysis = Omit<
+  PlayerGameAnalysis,
+  "username" | "commonOpenings"
+>;
+
+export interface ValidatedPlayerRef {
+  name: string;
+  analysis: PromptPlayerAnalysis;
+}
+
+/** What validateAnalyzeBody actually checked — exactly what buildPrompt needs. */
+export interface ValidatedAnalyzeBody {
+  player1: ValidatedPlayerRef;
+  player2: ValidatedPlayerRef;
+}
+
+/**
  * Deep shape check for a single player's analysis. Truthiness alone is not
  * enough: an empty object passes a truthy test but then explodes in buildPrompt
  * when it dereferences openingsAsWhite.slice(...) on undefined. We confirm the
  * fields buildPrompt actually reads are the right runtime types so a
  * malformed-but-present body is rejected with a 400 instead of throwing.
  */
-function isPlayerGameAnalysis(a: unknown): a is PlayerGameAnalysis {
+function isPromptPlayerAnalysis(a: unknown): a is PromptPlayerAnalysis {
   if (typeof a !== "object" || a === null) return false;
   const o = a as Record<string, unknown>;
   return (
@@ -53,8 +87,14 @@ function hasAnalysisField(ref: unknown): ref is { name?: unknown; analysis: unkn
   );
 }
 
-/** Validate the POST body shape before we spend a Claude call on it. */
-export function validateAnalyzeBody(body: unknown): Result<AnalyzeBody> {
+/**
+ * Validate the POST body shape before we spend a Claude call on it. Returns a
+ * `ValidatedAnalyzeBody` built purely from the fields that were actually
+ * checked — no cast to the wider wire type, so the result can't smuggle
+ * unvalidated fields (the old `body as AnalyzeBody` claimed `username` and
+ * `commonOpenings` were present without ever checking them).
+ */
+export function validateAnalyzeBody(body: unknown): Result<ValidatedAnalyzeBody> {
   if (typeof body !== "object" || body === null) {
     return { ok: false, error: "Missing player analysis data" };
   }
@@ -67,15 +107,21 @@ export function validateAnalyzeBody(body: unknown): Result<AnalyzeBody> {
   if (
     typeof b.player1.name !== "string" ||
     typeof b.player2.name !== "string" ||
-    !isPlayerGameAnalysis(b.player1.analysis) ||
-    !isPlayerGameAnalysis(b.player2.analysis)
+    !isPromptPlayerAnalysis(b.player1.analysis) ||
+    !isPromptPlayerAnalysis(b.player2.analysis)
   ) {
     return { ok: false, error: "Malformed player analysis data" };
   }
-  return { ok: true, value: body as AnalyzeBody };
+  return {
+    ok: true,
+    value: {
+      player1: { name: b.player1.name, analysis: b.player1.analysis },
+      player2: { name: b.player2.name, analysis: b.player2.analysis },
+    },
+  };
 }
 
-function summarizeForPrompt(name: string, analysis: PlayerGameAnalysis): string {
+function summarizeForPrompt(name: string, analysis: PromptPlayerAnalysis): string {
   const topWhite = analysis.openingsAsWhite
     .slice(0, 5)
     .map((o) => `${o.name} (${o.eco}): ${o.games} games, ${o.winRate}% win rate`)
@@ -102,7 +148,7 @@ Top openings as Black:
 `.trim();
 }
 
-export function buildPrompt(body: AnalyzeBody): string {
+export function buildPrompt(body: ValidatedAnalyzeBody): string {
   const p1 = body.player1.name;
   const p2 = body.player2.name;
   return `You are a chess coach analyzing two Chess.com players based on their recent game statistics.
@@ -127,24 +173,24 @@ Focus on: opening preferences, tactical vs positional tendencies, game length pa
 }
 
 /**
- * Extract and validate the play-style JSON from the model's raw text reply.
+ * Parse and shape-validate the play-style JSON from the model's reply.
  *
- * The model is asked for JSON-only, but may still wrap it in prose or a code
- * fence, so we pull the first {...} block. We then confirm every expected field
- * is a non-empty string BEFORE returning it — a missing gamePlan used to flow
- * straight through to the UI as undefined and crash .split() in the client.
+ * The reply comes from a *forced tool call* (`createMessage` re-stringifies the
+ * already-parsed tool input), so it is always a bare JSON document — the old
+ * "pull the first {...} out of prose or a code fence" regex path was dead code.
+ * We still confirm every expected field is a non-empty string BEFORE returning
+ * it — a missing gamePlan used to flow straight through to the UI as undefined
+ * and crash .split() in the client. Parse/shape failures keep mapping to 502.
  */
 export function extractAnalysisJson(text: string): Result<PlayStyleInsight> {
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) {
-    return { ok: false, error: "Model response contained no JSON object" };
-  }
-
   let parsed: unknown;
   try {
-    parsed = JSON.parse(jsonMatch[0]);
+    parsed = JSON.parse(text);
   } catch {
     return { ok: false, error: "Model response was not valid JSON" };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return { ok: false, error: "Model response was not a JSON object" };
   }
 
   const fields: (keyof PlayStyleInsight)[] = [

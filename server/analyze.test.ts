@@ -45,6 +45,23 @@ describe("validateAnalyzeBody", () => {
     expect(result.ok).toBe(true);
   });
 
+  it("accepts an analysis without fields the prompt never reads", () => {
+    // `username` and `commonOpenings` are part of the client wire type but the
+    // server never reads them — it must not require them.
+    const { username, commonOpenings, ...bare } = analysis();
+    void username;
+    void commonOpenings;
+    const result = validateAnalyzeBody({
+      player1: { name: "alice", analysis: bare },
+      player2: { name: "bob", analysis: bare },
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      // The validated value feeds buildPrompt directly, without casts.
+      expect(buildPrompt(result.value)).toContain("alice");
+    }
+  });
+
   it.each([
     ["null", null],
     ["undefined", undefined],
@@ -81,23 +98,28 @@ describe("extractAnalysisJson", () => {
     expect(result).toEqual({ ok: true, value: valid });
   });
 
-  it("extracts JSON even when wrapped in prose or a code fence", () => {
-    const wrapped = "Sure! Here you go:\n```json\n" + JSON.stringify(valid) + "\n```\nHope that helps.";
-    const result = extractAnalysisJson(wrapped);
+  it("preserves multi-paragraph string values verbatim", () => {
+    // Tool-forced output routinely carries literal newlines inside values.
+    const plan = "Open with 1. e4.\n\nThen castle early.\n\nTrade queens.";
+    const result = extractAnalysisJson(JSON.stringify({ ...valid, gamePlan: plan }));
     expect(result.ok).toBe(true);
-    if (result.ok) expect(result.value.gamePlan).toBe("the plan");
+    if (result.ok) expect(result.value.gamePlan).toBe(plan);
   });
 
-  it("fails when there is no JSON object at all", () => {
-    const result = extractAnalysisJson("I could not complete that request.");
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toMatch(/no JSON/i);
-  });
-
-  it("fails on a JSON-looking block that does not parse", () => {
+  it("fails on input that does not parse as JSON", () => {
     const result = extractAnalysisJson("{ player1: not quoted }");
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toMatch(/not valid JSON/i);
+  });
+
+  it.each([
+    ["a bare string", JSON.stringify("just text")],
+    ["a number", "42"],
+    ["an array", JSON.stringify([1, 2, 3])],
+    ["null", "null"],
+  ])("fails when the JSON document is %s, not an object", (_label, text) => {
+    const result = extractAnalysisJson(text);
+    expect(result.ok).toBe(false);
   });
 
   it("fails when a required field is missing (the old undefined-gamePlan crash)", () => {

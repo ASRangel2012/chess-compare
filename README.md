@@ -17,7 +17,18 @@ The backend only handles:
 - `POST /api/analyze` — sends aggregated game stats to Claude and returns play-style profiles (per-IP rate limited)
 - `GET /api/health` — health check for Docker
 
-The Anthropic API key stays server-side and is never exposed to the browser. `/api/analyze` is rate limited (10 requests/min per IP, in-memory) so a public deployment can't be abused to burn your API budget.
+The Anthropic API key stays server-side and is never exposed to the browser. `/api/analyze` is rate limited (10 requests/min per IP, in-memory) so a public deployment can't be abused to burn your API budget. Independently of the per-IP limit, a global concurrency cap (`ANALYZE_MAX_CONCURRENT`, default 4) bounds simultaneous upstream Claude calls; when saturated the endpoint sheds load immediately with `503` + `Retry-After` instead of queueing.
+
+### `/api/analyze` status codes
+
+| Status | Meaning |
+|--------|---------|
+| `200` | Parsed play-style insight |
+| `400` | Missing or malformed player analysis in the request body |
+| `429` | Per-IP rate limit exceeded (`Retry-After` header set) |
+| `502` | Upstream reply unusable — didn't parse/validate, or was **truncated** at the token cap (raise `ANTHROPIC_MAX_TOKENS`) |
+| `503` | No `ANTHROPIC_API_KEY` configured, or the global concurrency cap is saturated (`Retry-After` header set) |
+| `500` | Any other upstream/internal failure |
 
 In **development**, Vite runs on `:5173` and proxies `/api` → Express on `:3001`.
 In **production/Docker**, a single Express process serves both the static React build and the API on `:3001`.
@@ -27,9 +38,11 @@ In **production/Docker**, a single Express process serves both the static React 
 - Player profiles & rating comparison (bullet, blitz, rapid, daily)
 - Opening analysis from recent PGN data
 - **Head-to-head history** — scans monthly archives for direct matchups
-- **Inline game replay** — step through any head-to-head game on a board, powered by a small dependency-free PGN/SAN engine (`src/lib/chess.ts`)
+- **Inline game replay** — step through any head-to-head game on a board, powered by a small dependency-free PGN/SAN engine (`src/lib/chess.ts`). If a PGN contains a move the engine can't apply, the replay stops at the last good position and shows a warning instead of silently rendering a wrong board. The board is screen-reader accessible (`role="img"` position label + live move announcements).
 - Game length distribution
 - AI play style profiles via Claude
+- **Sticky section navigation** — jump between Players / Ratings / Openings / Head-to-Head / AI Analysis / Game Plan once results load
+- **Cancellation-aware loading** — starting a new comparison aborts the previous run's in-flight Chess.com requests (up to dozens of archive fetches) instead of letting them race the new run
 
 ## Local development
 
@@ -53,7 +66,8 @@ The backend reads these from `.env` (loaded via `dotenv`):
 |----------|----------|---------|---------|
 | `ANTHROPIC_API_KEY` | AI analysis only | — | Server-side key for the Claude proxy. Never sent to the browser. |
 | `ANTHROPIC_MODEL` | No | `claude-haiku-4-5` | Override the Claude model (e.g. `claude-sonnet-5` for longer, richer profiles). |
-| `ANTHROPIC_MAX_TOKENS` | No | `4096` | Upper bound on the model's reply. The analysis is one JSON object (two profiles, a matchup, and a detailed game plan); verbose models like Sonnet need enough room or the JSON is truncated and won't parse (`502`). |
+| `ANTHROPIC_MAX_TOKENS` | No | `4096` | Upper bound on the model's reply. The analysis is one JSON object (two profiles, a matchup, and a detailed game plan); verbose models like Sonnet need enough room or the reply is truncated at the cap and the API returns `502` with a "raise ANTHROPIC_MAX_TOKENS" message. |
+| `ANALYZE_MAX_CONCURRENT` | No | `4` | Global cap on concurrent upstream Claude calls (each holds a server socket for up to `ANTHROPIC_TIMEOUT_MS`). When saturated, `/api/analyze` returns `503` + `Retry-After` immediately — no queueing. |
 | `PORT` | No | `3001` | API port. The dev launcher auto-selects the next free port if this is taken; the Vite proxy follows it. |
 | `CORS_ORIGIN` | No | *(any)* | Comma-separated allow-list of origins for the API. Omit for permissive CORS (fine in dev); set it to your site on a public deployment. |
 | `LOG_LEVEL` | No | `info` | Minimum server log level (`debug` \| `info` \| `warn` \| `error`). Logs are emitted as structured JSON lines with a request id. |
@@ -88,7 +102,7 @@ The project includes shared run configurations in `.run/` and a WEB module in `.
 
 1. **Open the project** — File → Open → select the `chess-compare` folder.
 2. **Node.js** — Settings → Languages & Frameworks → Node.js  
-   Set the interpreter to your local Node 20+ install (or let IntelliJ download one).
+   Set the interpreter to your local Node 22+ install (or let IntelliJ download one).
 3. **Install dependencies** — open the built-in terminal and run:
    ```bash
    npm install
@@ -151,9 +165,9 @@ npm test
 They cover:
 
 - **Pure data layer** — PGN parsing (`deriveTimeClass`, `normalizeResult`, opening-name resolution), per-player aggregation, and head-to-head summarization.
-- **Chess engine** (`chess.ts`) — replaying famous games move-by-move, including castling, en passant, promotion, explicit disambiguation, and the implicit *disambiguation-by-pin* case (king-safety fallback).
-- **Network layer** — a mocked-`fetch` test that verifies the archive fetcher's concurrency limit, caching, early-stop, and newest-first ordering.
-- **Comparison orchestration** (`compare.ts`) — `Promise.allSettled` profile resolution and precise error mapping, tested with injected fakes (no network, no DOM).
-- **Server** (`analyze.ts`, `rateLimit.ts`, `app.ts`) — request validation, model-output parsing/shape-validation, the rate limiter, and the `/api/analyze` endpoint end-to-end with an injected Claude stub (503 / 400 / 429 / 502 / 200 paths).
+- **Chess engine** (`chess.ts`) — replaying famous games move-by-move, including castling, en passant, promotion, explicit disambiguation, and the implicit *disambiguation-by-pin* case (king-safety fallback); plus no-silent-truncation regressions (every parsed SAN must apply, corrupt/ambiguous SAN flags `truncated`) and the bounded PGN-token memo cache.
+- **Network layer** — mocked-`fetch` tests for the archive fetcher's concurrency limit, caching, early-stop, newest-first ordering, cancellation (abort mid-scan stops further fetches and doesn't poison the cache), and month-boundary cache behavior with an injected clock.
+- **Comparison orchestration** (`compare.ts`, `progressiveLoad.ts`) — `Promise.allSettled` profile resolution, precise error mapping, AbortSignal threading, the stale-run race, and AI-vs-comparison error routing, tested with injected fakes (no network, no DOM).
+- **Server** (`analyze.ts`, `rateLimit.ts`, `semaphore.ts`, `app.ts`) — request validation, model-output parsing/shape-validation, the rate limiter, the concurrency semaphore, and the `/api/analyze` endpoint end-to-end with an injected Claude stub (503 / 400 / 429 / 502 truncation & parse / 200 paths).
 
-`.github/workflows/ci.yml` runs type-che
+`.github/workflows/ci.yml` runs type-checking, the unit suite, and the production build on Node 22 (matching the Docker base image) for every push and pull request.

@@ -4,6 +4,8 @@ import { fileURLToPath } from "url";
 import Anthropic from "@anthropic-ai/sdk";
 import { createApp } from "./app";
 import { createRateLimiter } from "./rateLimit";
+import { createSemaphore } from "./semaphore";
+import { TruncatedReplyError } from "./analyze";
 import { logger, serializeError } from "./logger";
 import { resolveCorsOptions } from "./corsConfig";
 import { parseTrustProxy } from "./trustProxy";
@@ -21,6 +23,14 @@ const MAX_TOKENS = Number(process.env.ANTHROPIC_MAX_TOKENS ?? 4096);
 // you also accept the larger worst-case latency.
 const ANTHROPIC_TIMEOUT_MS = Number(process.env.ANTHROPIC_TIMEOUT_MS ?? 90_000);
 const ANTHROPIC_MAX_RETRIES = Number(process.env.ANTHROPIC_MAX_RETRIES ?? 0);
+// Global ceiling on concurrent upstream Anthropic calls. Each in-flight call
+// holds an Express socket for up to ANTHROPIC_TIMEOUT_MS, so this bounds both
+// upstream pressure and socket usage; excess requests get an immediate 503.
+const rawMaxConcurrent = Number(process.env.ANALYZE_MAX_CONCURRENT ?? 4);
+const ANALYZE_MAX_CONCURRENT =
+  Number.isFinite(rawMaxConcurrent) && rawMaxConcurrent >= 1
+    ? Math.floor(rawMaxConcurrent)
+    : 4;
 
 const anthropic = process.env.ANTHROPIC_API_KEY
   ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
@@ -89,7 +99,9 @@ const createMessage = anthropic
       });
 
       if (message.stop_reason === "max_tokens") {
-        throw new Error(
+        // Recognizable truncation error: the /api/analyze route maps this to a
+        // 502 with the actionable "raise ANTHROPIC_MAX_TOKENS" message.
+        throw new TruncatedReplyError(
           `Model reply hit the ${MAX_TOKENS}-token cap before finishing. Raise ANTHROPIC_MAX_TOKENS and retry.`
         );
       }
@@ -115,6 +127,7 @@ setInterval(() => rateLimiter.sweep(), 60_000).unref();
 const app = createApp({
   createMessage,
   rateLimiter,
+  analyzeSemaphore: createSemaphore(ANALYZE_MAX_CONCURRENT),
   logger,
   isProduction,
   trustProxy,
@@ -140,9 +153,16 @@ function gracefulShutdown(signal: string, code = 0): void {
   logger.info("shutting down", { signal });
   const forced = setTimeout(() => {
     logger.warn("forced shutdown: server.close timed out");
+    // Tear down whatever is still open (in-flight requests included) so the
+    // exit below isn't blocked by lingering sockets.
+    server.closeAllConnections();
     process.exit(code || 1);
   }, 10_000);
   forced.unref();
+  // server.close() alone waits for idle keep-alive connections to time out,
+  // which routinely rode out the full force-exit window. Proactively close
+  // idle sockets; in-flight requests still get to finish.
+  server.closeIdleConnections();
   server.close((err) => {
     if (err) {
       logger.error("error during server.close", { err: serializeError(err) });
@@ -168,4 +188,3 @@ process.on("uncaughtException", (err) => {
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
   process.on(signal, () => gracefulShutdown(signal));
 }
-

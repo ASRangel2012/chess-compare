@@ -6,6 +6,8 @@ interface GamePlanProps {
   player2Name: string;
   insights: PlayStyleInsight | null;
   loading: boolean;
+  /** AI-analysis failure message (comparison results are unaffected). */
+  error?: string | null;
   onRetry: () => void;
 }
 
@@ -14,6 +16,7 @@ export function GamePlan({
   player2Name,
   insights,
   loading,
+  error,
   onRetry,
 }: GamePlanProps) {
   if (loading) {
@@ -33,8 +36,8 @@ export function GamePlan({
         <div className="empty-state">
           <IconTargetArrow size={40} />
           <p>
-            The game plan is generated alongside the AI analysis — it needs the
-            backend server with an Anthropic API key.
+            {error ??
+              "The game plan is generated alongside the AI analysis — it needs the backend server with an Anthropic API key."}
           </p>
           <button
             type="button"

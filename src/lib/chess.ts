@@ -205,6 +205,14 @@ function applySan(state: State, sanRaw: string): { state: State; from: number; t
       const one = sq(tf, tr - dir);
       from = board2[one] && board2[one]!.toUpperCase() === "P" ? one : sq(tf, tr - 2 * dir);
     }
+    // The inferred source must actually hold the moving side's pawn — otherwise
+    // the SAN is corrupt (or our inference is wrong) and executing the move
+    // would silently corrupt the board.
+    // (An off-board `from` indexes outside 0..63 and fails this check too.)
+    const pawnChar = turn === "w" ? "P" : "p";
+    if (board2[from] !== pawnChar) {
+      throw new Error(`Illegal pawn move: ${sanRaw}`);
+    }
   } else {
     const target = turn === "w" ? type : type.toLowerCase();
     const candidates: number[] = [];
@@ -214,11 +222,24 @@ function applySan(state: State, sanRaw: string): { state: State; from: number; t
       if (disRank !== null && rankOf(s) !== disRank) continue;
       if (canReach(board2, type, s, to)) candidates.push(s);
     }
-    from =
-      candidates.length === 1
-        ? candidates[0]
-        : // Multiple pseudo-legal sources: pick the one that doesn't leave our king in check.
-          candidates.find((s) => !leavesKingInCheck(board2, s, to, turn)) ?? candidates[0];
+    if (candidates.length === 1) {
+      from = candidates[0];
+    } else {
+      // Multiple pseudo-legal sources with no (sufficient) SAN disambiguation:
+      // only a move that doesn't leave our own king in check is legal. If that
+      // filter doesn't leave exactly one candidate, the SAN is genuinely
+      // ambiguous (or has no legal source) — throw rather than guess a wrong
+      // board, which surfaces to the caller as a truncated replay.
+      const legal = candidates.filter((s) => !leavesKingInCheck(board2, s, to, turn));
+      if (legal.length !== 1) {
+        throw new Error(
+          candidates.length === 0
+            ? `No piece can play ${sanRaw}`
+            : `Ambiguous SAN: ${sanRaw}`
+        );
+      }
+      from = legal[0];
+    }
   }
 
   // Execute the move.
@@ -251,10 +272,45 @@ function leavesKingInCheck(board: Board, from: number, to: number, color: Color)
 }
 
 /**
+ * Bounded memo cache for `parsePgnMoves`. Several code paths tokenize the same
+ * PGN (per-game analysis, head-to-head summarization, replay), so caching the
+ * token list avoids re-tokenizing full movetext on every call. Small LRU keyed
+ * by the PGN string; callers must treat the returned array as read-only.
+ */
+export const PGN_TOKEN_CACHE_MAX = 200;
+const pgnTokenCache = new Map<string, string[]>();
+
+/** Current number of memoized token lists. Exposed for tests. */
+export function pgnTokenCacheSize(): number {
+  return pgnTokenCache.size;
+}
+
+/**
  * Extract the SAN move tokens from PGN movetext, stripping headers, comments,
- * NAGs, move numbers, and the result token.
+ * NAGs, move numbers, and the result token. Memoized per PGN string (bounded
+ * LRU) — do not mutate the returned array.
  */
 export function parsePgnMoves(pgn: string): string[] {
+  const cached = pgnTokenCache.get(pgn);
+  if (cached !== undefined) {
+    // Refresh recency: Map preserves insertion order, so re-inserting moves
+    // this entry to the most-recently-used position.
+    pgnTokenCache.delete(pgn);
+    pgnTokenCache.set(pgn, cached);
+    return cached;
+  }
+  const tokens = tokenizePgn(pgn);
+  pgnTokenCache.set(pgn, tokens);
+  if (pgnTokenCache.size > PGN_TOKEN_CACHE_MAX) {
+    for (const lru of pgnTokenCache.keys()) {
+      pgnTokenCache.delete(lru);
+      if (pgnTokenCache.size <= PGN_TOKEN_CACHE_MAX) break;
+    }
+  }
+  return tokens;
+}
+
+function tokenizePgn(pgn: string): string[] {
   const movetext = pgn
     .replace(/\[[^\]]*\]/g, " ") // headers
     .replace(/\{[^}]*\}/g, " ") // { comments } incl. clock annotations
@@ -268,11 +324,22 @@ export function parsePgnMoves(pgn: string): string[] {
     .filter((t) => t.length > 0 && t !== "..." && !results.has(t));
 }
 
+export interface ReplayResult {
+  /** Plies successfully replayed (index 0 = start position). */
+  plies: Ply[];
+  /** True when a SAN failed to apply and replay stopped early. */
+  truncated: boolean;
+  /** The SAN token that failed to apply, when `truncated` is true. */
+  failedSan?: string;
+}
+
 /**
  * Replay a PGN into an array of plies (index 0 = start position). If a move
- * fails to parse, replay stops gracefully and returns the plies collected so far.
+ * fails to parse or apply, replay stops at the last good ply and the result is
+ * flagged `truncated` (with the offending SAN) so callers can warn the user
+ * instead of silently rendering a wrong or shortened game.
  */
-export function replayGame(pgn: string): Ply[] {
+export function replayGame(pgn: string): ReplayResult {
   const sans = parsePgnMoves(pgn);
   const plies: Ply[] = [
     { board: startPosition(), lastMove: null, san: null, moveNumber: 0, movedBy: null },
@@ -292,11 +359,12 @@ export function replayGame(pgn: string): Ply[] {
         movedBy,
       });
     } catch {
-      break; // best-effort: show what we successfully replayed
+      // Best-effort: keep what replayed cleanly, but tell the caller.
+      return { plies, truncated: true, failedSan: sans[i] };
     }
   }
 
-  return plies;
+  return { plies, truncated: false };
 }
 
 const GLYPHS: Record<string, string> = {
