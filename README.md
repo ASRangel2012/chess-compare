@@ -230,6 +230,7 @@ They cover:
 - **Chess engine** (`chess.ts`) — replaying famous games move-by-move, including castling, en passant, promotion, explicit disambiguation, and the implicit *disambiguation-by-pin* case (king-safety fallback); plus no-silent-truncation regressions (every parsed SAN must apply, corrupt/ambiguous SAN flags `truncated`) and the bounded PGN-token memo cache.
 - **Network layer** — mocked-`fetch` tests for the archive fetcher's concurrency limit, caching, early-stop, newest-first ordering, cancellation (abort mid-scan stops further fetches and doesn't poison the cache), and month-boundary cache behavior with an injected clock.
 - **Comparison orchestration** (`compare.ts`, `progressiveLoad.ts`) — `Promise.allSettled` profile resolution, precise error mapping, AbortSignal threading, the stale-run race, and AI-vs-comparison error routing, tested with injected fakes (no network, no DOM).
+- **Components** (`GameViewer`, `PlayStyleAnalysis`, `GamePlan`) — jsdom render tests for the replay controls (clamping, move-list jumps, reset on new game, the truncation warning) and the AI cards' loading/error/retry/empty states.
 - **Server** (`analyze.ts`, `rateLimit.ts`, `semaphore.ts`, `app.ts`) — request validation, model-output parsing/shape-validation, the rate limiter, the concurrency semaphore, and the `/api/analyze` endpoint end-to-end with an injected Claude stub (503 / 400 / 429 / 502 truncation & parse / 200 paths).
 
 `.github/workflows/ci.yml` runs two jobs on every push and pull request: lint,
