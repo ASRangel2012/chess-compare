@@ -6,6 +6,14 @@
  * actually sends).
  */
 
+/**
+ * Chess.com usernames: 3-25 letters, digits, or underscores. Shared so the
+ * client (pre-flight check in compare.ts) and the server (/api/analyze body
+ * validation) enforce the same rule — player names are interpolated into the
+ * Claude prompt, so the server must not rely on the client having checked.
+ */
+export const CHESSCOM_USERNAME_RE = /^[A-Za-z0-9_]{3,25}$/;
+
 export interface OpeningStats {
   name: string;
   eco: string;

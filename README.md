@@ -24,7 +24,7 @@ The Anthropic API key stays server-side and is never exposed to the browser. `/a
 | Status | Meaning |
 |--------|---------|
 | `200` | Parsed play-style insight |
-| `400` | Missing or malformed player analysis in the request body |
+| `400` | Missing or malformed player analysis in the request body — including names that aren't valid Chess.com usernames or fields exceeding server-side size bounds (everything in the body is interpolated into the Claude prompt, so the server validates format and length itself rather than trusting the client) |
 | `429` | Per-IP rate limit exceeded (`Retry-After` header set) |
 | `502` | Upstream reply unusable — didn't parse/validate, or was **truncated** at the token cap (raise `ANTHROPIC_MAX_TOKENS`) |
 | `503` | No `ANTHROPIC_API_KEY` configured, or the global concurrency cap is saturated (`Retry-After` header set) |
