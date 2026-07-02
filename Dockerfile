@@ -25,6 +25,11 @@ RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/dist-server ./dist-server
 
+# Drop root: the server only needs to read /app and bind a non-privileged
+# port. The node user ships with the base image; k8s runAsNonRoot and most
+# admission policies reject root containers.
+USER node
+
 EXPOSE 3001
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

@@ -33,6 +33,10 @@ spec:
         prometheus.io/path: /metrics
         prometheus.io/port: "3001"
     spec:
+      securityContext:
+        # The image runs as the unprivileged node user (uid 1000); enforce it
+        # here so a regression in the Dockerfile fails admission, not audit.
+        runAsNonRoot: true
       # The server drains on SIGTERM (closes idle sockets, lets in-flight
       # requests finish) and force-exits after 10s if close() hangs. 30s gives
       # that sequence room; it must stay ABOVE the server's 10s backstop.
@@ -41,6 +45,10 @@ spec:
         - name: chess-compare
           image: chess-compare:local
           imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
           ports:
             - name: http
               containerPort: 3001
