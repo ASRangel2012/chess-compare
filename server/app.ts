@@ -6,6 +6,7 @@ import type { Logger } from "./logger";
 import { serializeError } from "./logger";
 import type { RateLimiter } from "./rateLimit";
 import type { Semaphore } from "./semaphore";
+import type { Metrics } from "./metrics";
 import {
   validateAnalyzeBody,
   buildPrompt,
@@ -27,6 +28,8 @@ export interface AppDeps {
    */
   analyzeSemaphore: Semaphore;
   logger: Logger;
+  /** Prometheus registry backing GET /metrics; fed by the middleware below. */
+  metrics: Metrics;
   isProduction: boolean;
   /**
    * Express `trust proxy` setting. Must match the real deployment topology, or
@@ -57,6 +60,22 @@ function asyncHandler(
   };
 }
 
+/**
+ * Collapse a request path to a fixed label set so metric cardinality stays
+ * bounded — a scanner spraying random URLs must not mint an unbounded number
+ * of time series in the registry.
+ */
+function routeLabelFor(pathname: string): string {
+  switch (pathname) {
+    case "/api/analyze":
+    case "/api/health":
+    case "/metrics":
+      return pathname;
+    default:
+      return pathname.startsWith("/api/") ? "/api/other" : "spa";
+  }
+}
+
 export function createApp(deps: AppDeps): express.Express {
   const app = express();
   // Trust proxy must match the real topology (see AppDeps.trustProxy). Default
@@ -76,18 +95,29 @@ export function createApp(deps: AppDeps): express.Express {
     next();
   });
 
-  // Structured access log — one line per request, emitted once the response is
+  // Structured access log + request metrics — emitted once the response is
   // sent so we capture the final status and duration.
   app.use((req, res, next) => {
     const start = Date.now();
     res.on("finish", () => {
+      const durationMs = Date.now() - start;
       deps.logger.info("request", {
         requestId: res.locals.requestId,
         method: req.method,
         path: req.originalUrl,
         status: res.statusCode,
-        durationMs: Date.now() - start,
+        durationMs,
       });
+      const route = routeLabelFor((req.originalUrl ?? req.url).split("?")[0]);
+      deps.metrics.observeHttpRequest(
+        { method: req.method, route, status: res.statusCode },
+        durationMs / 1000
+      );
+      // The only source of 429s on this route is the per-IP limiter, so this
+      // observes limiter hits without coupling the limiter to the registry.
+      if (route === "/api/analyze" && res.statusCode === 429) {
+        deps.metrics.incRateLimitHit();
+      }
     });
     next();
   });
@@ -144,6 +174,7 @@ export function createApp(deps: AppDeps): express.Express {
     // up to the Anthropic timeout, so when we're saturated, shed load
     // immediately (503 + Retry-After) instead of queueing.
     if (!deps.analyzeSemaphore.tryAcquire()) {
+      deps.metrics.incAnalyzeShed();
       log.warn("analyze concurrency limit reached", {
         max: deps.analyzeSemaphore.max,
       });
@@ -197,6 +228,14 @@ export function createApp(deps: AppDeps): express.Express {
 
   app.get("/api/health", (_req, res) => {
     res.json({ ok: true, hasApiKey: Boolean(deps.createMessage) });
+  });
+
+  // Prometheus scrape endpoint. Deliberately outside /api so the JSON-404
+  // guard below stays API-scoped. On a public deployment, keep it internal:
+  // scrape over the pod network and exclude /metrics at the ingress.
+  app.get("/metrics", (_req, res) => {
+    res.set("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
+    res.send(deps.metrics.render());
   });
 
   // Any unmatched /api/* route is a JSON 404 — it must never fall through to the

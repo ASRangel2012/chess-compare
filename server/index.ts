@@ -5,6 +5,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { createApp } from "./app";
 import { createRateLimiter } from "./rateLimit";
 import { createSemaphore } from "./semaphore";
+import { createMetrics } from "./metrics";
 import { TruncatedReplyError } from "./analyze";
 import { logger, serializeError } from "./logger";
 import { resolveCorsOptions } from "./corsConfig";
@@ -36,6 +37,8 @@ const anthropic = process.env.ANTHROPIC_API_KEY
   ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
   : null;
 
+const metrics = createMetrics();
+
 // Get structured output via a forced tool call instead of asking the model to
 // hand-write JSON. Multi-paragraph string values (the profiles and game plan)
 // routinely contain literal newlines and quotes that break JSON.parse; letting
@@ -47,51 +50,67 @@ const ANALYSIS_TOOL_NAME = "emit_play_style_analysis";
 const createMessage = anthropic
   ? async (prompt: string): Promise<string> => {
       const startedAt = Date.now();
-      const message = await anthropic.messages.create(
-        {
-        model: MODEL,
-        max_tokens: MAX_TOKENS,
-        tools: [
+      let message: Anthropic.Message;
+      try {
+        message = await anthropic.messages.create(
           {
-            name: ANALYSIS_TOOL_NAME,
-            description:
-              "Return the two play-style profiles, the style matchup, and the game plan for player 1.",
-            input_schema: {
-              type: "object",
-              properties: {
-                player1: {
-                  type: "string",
-                  description: "2-3 paragraph play-style profile for the first player",
+          model: MODEL,
+          max_tokens: MAX_TOKENS,
+          tools: [
+            {
+              name: ANALYSIS_TOOL_NAME,
+              description:
+                "Return the two play-style profiles, the style matchup, and the game plan for player 1.",
+              input_schema: {
+                type: "object",
+                properties: {
+                  player1: {
+                    type: "string",
+                    description: "2-3 paragraph play-style profile for the first player",
+                  },
+                  player2: {
+                    type: "string",
+                    description: "2-3 paragraph play-style profile for the second player",
+                  },
+                  matchup: {
+                    type: "string",
+                    description: "1-2 paragraph analysis of how the two styles clash",
+                  },
+                  gamePlan: {
+                    type: "string",
+                    description:
+                      "detailed, multi-paragraph game plan for how player 1 can beat player 2",
+                  },
                 },
-                player2: {
-                  type: "string",
-                  description: "2-3 paragraph play-style profile for the second player",
-                },
-                matchup: {
-                  type: "string",
-                  description: "1-2 paragraph analysis of how the two styles clash",
-                },
-                gamePlan: {
-                  type: "string",
-                  description:
-                    "detailed, multi-paragraph game plan for how player 1 can beat player 2",
-                },
+                required: ["player1", "player2", "matchup", "gamePlan"],
               },
-              required: ["player1", "player2", "matchup", "gamePlan"],
             },
+          ],
+          tool_choice: { type: "tool", name: ANALYSIS_TOOL_NAME },
+          messages: [{ role: "user", content: prompt }],
           },
-        ],
-        tool_choice: { type: "tool", name: ANALYSIS_TOOL_NAME },
-        messages: [{ role: "user", content: prompt }],
-        },
-        // Bound the upstream call: a hung/slow model must not tie up the request.
-        { timeout: ANTHROPIC_TIMEOUT_MS, maxRetries: ANTHROPIC_MAX_RETRIES }
-      );
+          // Bound the upstream call: a hung/slow model must not tie up the request.
+          { timeout: ANTHROPIC_TIMEOUT_MS, maxRetries: ANTHROPIC_MAX_RETRIES }
+        );
+      } catch (err) {
+        // A failed or timed-out call still spent real wall-clock time — record
+        // it so upstream failures show up in latency dashboards, not just logs.
+        metrics.observeAnthropicCall("error", (Date.now() - startedAt) / 1000);
+        throw err;
+      }
+
+      const elapsedMs = Date.now() - startedAt;
+      // Tokens are spent even when the reply is truncated below, so record the
+      // usage before the stop_reason check — spend tracking must include it.
+      metrics.observeAnthropicCall("success", elapsedMs / 1000, {
+        inputTokens: message.usage.input_tokens,
+        outputTokens: message.usage.output_tokens,
+      });
 
       // Observability for an AI proxy: token cost and upstream latency are the
       // first incident questions. Never log the raw model output.
       logger.info("anthropic message", {
-        ms: Date.now() - startedAt,
+        ms: elapsedMs,
         inputTokens: message.usage.input_tokens,
         outputTokens: message.usage.output_tokens,
         stopReason: message.stop_reason,
@@ -124,11 +143,19 @@ const rateLimiter = createRateLimiter({ windowMs: 60_000, max: 10 });
 
 setInterval(() => rateLimiter.sweep(), 60_000).unref();
 
+const analyzeSemaphore = createSemaphore(ANALYZE_MAX_CONCURRENT);
+// Saturation gauge: alert when in_use sits at max (every new analyze is shed).
+metrics.registerAnalyzeInUseGauge(
+  () => analyzeSemaphore.inUse,
+  analyzeSemaphore.max
+);
+
 const app = createApp({
   createMessage,
   rateLimiter,
-  analyzeSemaphore: createSemaphore(ANALYZE_MAX_CONCURRENT),
+  analyzeSemaphore,
   logger,
+  metrics,
   isProduction,
   trustProxy,
   distPath: path.join(__dirname, "../dist"),

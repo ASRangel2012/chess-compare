@@ -16,6 +16,7 @@ Chess.com data (profiles, stats, PGN archives) is fetched **client-side** — th
 The backend only handles:
 - `POST /api/analyze` — sends aggregated game stats to Claude and returns play-style profiles (per-IP rate limited)
 - `GET /api/health` — health check for Docker
+- `GET /metrics` — Prometheus metrics for dashboards and alerts (request durations, Claude latency and token usage, rate-limit and load-shed counters, concurrency saturation)
 
 The Anthropic API key stays server-side and is never exposed to the browser. `/api/analyze` is rate limited (10 requests/min per IP, in-memory) so a public deployment can't be abused to burn your API budget. Independently of the per-IP limit, a global concurrency cap (`ANALYZE_MAX_CONCURRENT`, default 4) bounds simultaneous upstream Claude calls; when saturated the endpoint sheds load immediately with `503` + `Retry-After` instead of queueing.
 
@@ -153,6 +154,26 @@ docker run -p 3001:3001 -e ANTHROPIC_API_KEY=sk-ant-... chess-compare
 | `npm run typecheck` | Type-check the project (`tsc -b`) |
 | `npm test` | Run the Vitest unit suite |
 | `npm run test:watch` | Run Vitest in watch mode |
+
+## Observability
+
+The server emits structured JSON logs (one line per request with a request id,
+status, and duration; every Claude call logs latency, token usage, and stop
+reason) and serves Prometheus metrics at `GET /metrics` (text exposition,
+dependency-free — see `server/metrics.ts`):
+
+| Metric | Type | Use |
+|--------|------|-----|
+| `http_request_duration_seconds{method,route,status}` | histogram | per-route latency/error-rate SLOs |
+| `anthropic_request_duration_seconds{outcome}`, `anthropic_requests_total{outcome}` | histogram + counter | Claude latency and failure rate |
+| `anthropic_input_tokens` / `anthropic_output_tokens` | histograms | token spend distribution over time |
+| `rate_limit_hits_total` | counter | per-IP abuse pressure (429s) |
+| `analyze_shed_total`, `analyze_semaphore_in_use` / `_max` | counter + gauges | load shedding & saturation — alert when `in_use` pins at `max` |
+
+Route labels collapse to a fixed set (`/api/analyze`, `/api/health`, `/metrics`,
+`/api/other`, `spa`) so a scanner spraying URLs can't mint unbounded time
+series. On a public deployment keep `/metrics` internal: scrape it over the pod
+network and exclude the path at your ingress.
 
 ## Testing & CI
 
