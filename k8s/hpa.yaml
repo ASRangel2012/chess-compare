@@ -1,0 +1,27 @@
+# CPU-based autoscaling for the API pod.
+#
+# CAVEAT (read before raising maxReplicas): the per-IP rate limiter and the
+# analyze concurrency semaphore are in-memory, so every replica multiplies
+# both — N replicas give one client N× the per-IP budget and N× the global
+# Claude concurrency (N × ANALYZE_MAX_CONCURRENT upstream calls, i.e. N× the
+# worst-case spend). That is a documented single-instance limitation ("Scaling
+# limits" in the README); moving the limiter to a shared store (Redis) is the
+# prerequisite for scaling this out safely. maxReplicas stays deliberately low.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: chess-compare
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: chess-compare
+  minReplicas: 1
+  maxReplicas: 2
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

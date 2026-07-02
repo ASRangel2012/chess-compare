@@ -95,6 +95,46 @@ Or use Docker (below). On a host (Render, Railway, Fly, a VPS, etc.), set
 it. A hosted instance lets reviewers try the AI analysis without supplying their own key —
 the key stays server-side, and the per-IP rate limit (10 req/min) guards the budget.
 
+## Kubernetes
+
+`k8s/` has ready-to-apply manifests: a Deployment (liveness/readiness probes on
+`/api/health/live` / `/api/health/ready`, resource requests/limits, and a
+`terminationGracePeriodSeconds` that outlasts the server's 10s forced-shutdown
+backstop so SIGTERM draining can finish), a ClusterIP Service, and a
+deliberately conservative HPA.
+
+Two things to know before applying:
+
+- **`CORS_ORIGIN` is required** — in production the server fails closed and
+  refuses to boot without an explicit allow-list. Edit the placeholder origin
+  in `k8s/deployment.yaml`.
+- **Scaling caveat** — the per-IP rate limiter and the analyze concurrency cap
+  are in-memory, i.e. *per pod*. Every extra replica multiplies both. See
+  the comments in `k8s/hpa.yaml` before raising `maxReplicas`.
+
+### Local cluster (kind)
+
+```bash
+kind create cluster
+docker build -t chess-compare:local .
+kind load docker-image chess-compare:local
+
+# Optional — without it the app runs in its documented no-AI degraded mode:
+kubectl create secret generic chess-compare \
+  --from-literal=ANTHROPIC_API_KEY=sk-ant-...
+
+kubectl apply -f k8s/
+kubectl rollout status deploy/chess-compare
+kubectl port-forward svc/chess-compare 3001:80
+```
+
+Open [http://localhost:3001](http://localhost:3001). For minikube, replace the
+image load step with `minikube image load chess-compare:local`.
+
+Prometheus can scrape `/metrics` via the pod annotations already set in the
+Deployment; if you put an Ingress in front, exclude `/metrics` from public
+routing.
+
 ## IntelliJ IDEA / WebStorm
 
 The project includes shared run configurations in `.run/` and a WEB module in `.idea/`.
