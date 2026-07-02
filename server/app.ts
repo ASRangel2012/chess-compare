@@ -62,6 +62,14 @@ function asyncHandler(
 }
 
 /**
+ * A reflected request id must be boring: bounded length and a conservative
+ * charset. Anything fancier gets replaced, not echoed — the inbound value ends
+ * up in a response header and in every structured log line for the request,
+ * so this is the wrong place to trust client input.
+ */
+const SAFE_REQUEST_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
+
+/**
  * Collapse a request path to a fixed label set so metric cardinality stays
  * bounded — a scanner spraying random URLs must not mint an unbounded number
  * of time series in the registry.
@@ -89,10 +97,11 @@ export function createApp(deps: AppDeps): express.Express {
   // Attach a request id (honoring an inbound X-Request-Id) for correlating logs.
   app.use((req, res, next) => {
     const inbound = req.headers["x-request-id"];
-    // Cap a reflected inbound id so a client can't bloat every log line with it.
-    const id =
-      (typeof inbound === "string" && inbound && inbound.slice(0, 128)) ||
-      randomUUID();
+    // Cap the reflected id (log-line bloat), then require a safe charset —
+    // an id that fails the check is replaced with a generated one instead of
+    // being reflected into the response header and the logs.
+    const candidate = typeof inbound === "string" ? inbound.slice(0, 128) : "";
+    const id = SAFE_REQUEST_ID_RE.test(candidate) ? candidate : randomUUID();
     res.locals.requestId = id;
     res.setHeader("X-Request-Id", id);
     next();

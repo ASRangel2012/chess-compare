@@ -388,6 +388,20 @@ describe("middleware", () => {
     expect(res.headers.get("x-request-id")).toBe("z".repeat(128));
   });
 
+  it("replaces an inbound X-Request-Id with unsafe characters", async () => {
+    // Regression: the id was reflected after only a length cap, so quotes,
+    // spaces, or markup flowed into the response header and every structured
+    // log line for the request.
+    const base = await start({ createMessage: null });
+    const res = await fetch(`${base}/api/health`, {
+      headers: { "X-Request-Id": 'abc "def} <script>' },
+    });
+    expect(res.status).toBe(200);
+    const echoed = res.headers.get("x-request-id")!;
+    expect(echoed).not.toContain("abc");
+    expect(echoed).toMatch(/^[0-9a-f-]{36}$/); // a generated UUID instead
+  });
+
   it("sets baseline security headers", async () => {
     const base = await start({ createMessage: null });
     const res = await fetch(`${base}/api/health`);
