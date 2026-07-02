@@ -14,6 +14,7 @@ import {
   findCommonOpenings,
 } from "./chessApi";
 import { analyzeGames } from "./pgnParser";
+import { CHESSCOM_USERNAME_RE } from "../../shared/contract";
 import type {
   ChessGame,
   ChessPlayerProfile,
@@ -79,18 +80,16 @@ const defaultDeps: CompareDeps = {
 };
 
 /**
- * Chess.com usernames are 3-25 chars of letters, digits, or underscores.
  * Validating up front rejects junk before any network call or Claude token
- * spend, and closes a mild prompt-injection vector (names are interpolated into
- * the prompt).
+ * spend. The username format itself lives in the shared contract because the
+ * server enforces the same rule on /api/analyze — see shared/contract.ts.
  */
-const USERNAME_RE = /^[A-Za-z0-9_]{3,25}$/;
 
 /** Returns a user-facing error message, or null if the inputs are valid. */
 export function validateUsernames(u1: string, u2: string): string | null {
   if (!u1 || !u2) return "Please enter both usernames.";
   if (u1 === u2) return "Enter two different players to compare.";
-  if (!USERNAME_RE.test(u1) || !USERNAME_RE.test(u2)) {
+  if (!CHESSCOM_USERNAME_RE.test(u1) || !CHESSCOM_USERNAME_RE.test(u2)) {
     return "Enter valid Chess.com usernames (3-25 letters, numbers, or underscores).";
   }
   return null;

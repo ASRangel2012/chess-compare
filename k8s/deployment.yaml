@@ -1,0 +1,96 @@
+# Deployment for the chess-compare server (SPA + API in one container).
+#
+# Assumes the image was built locally and loaded into the cluster (see the
+# Kubernetes section of the README for the kind/minikube workflow). For a real
+# registry, replace `image:` and drop imagePullPolicy.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chess-compare
+  labels:
+    app: chess-compare
+spec:
+  # NOTE: the per-IP rate limiter and the analyze concurrency cap are in-memory
+  # and therefore *per pod* — with N replicas a client gets N× the per-IP
+  # budget, and the effective Claude concurrency cap is N × ANALYZE_MAX_CONCURRENT.
+  # Scale beyond 1 replica only after accounting for that (see "Scaling limits"
+  # in the README); hpa.yaml carries the same caveat.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: chess-compare
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: chess-compare
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "3001"
+    spec:
+      securityContext:
+        # The image runs as the unprivileged node user (uid 1000); enforce it
+        # here so a regression in the Dockerfile fails admission, not audit.
+        runAsNonRoot: true
+      # The server drains on SIGTERM (closes idle sockets, lets in-flight
+      # requests finish) and force-exits after 10s if close() hangs. 30s gives
+      # that sequence room; it must stay ABOVE the server's 10s backstop.
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: chess-compare
+          image: chess-compare:local
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: http
+              containerPort: 3001
+          env:
+            - name: NODE_ENV
+              value: production
+            - name: PORT
+              value: "3001"
+            # REQUIRED in production: the server fails closed and refuses to
+            # boot without an explicit CORS allow-list. Set your real origin.
+            - name: CORS_ORIGIN
+              value: https://chess-compare.example.com
+            # Optional — without a key the app runs in its supported degraded
+            # mode (every Chess.com feature works; the AI card explains itself).
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: chess-compare
+                  key: ANTHROPIC_API_KEY
+                  optional: true
+            # Behind the Service/ingress there is at least one proxy hop; keep
+            # this matched to the real topology or per-IP limits break.
+            - name: TRUST_PROXY
+              value: "1"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /api/health/live
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/health/ready
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 2

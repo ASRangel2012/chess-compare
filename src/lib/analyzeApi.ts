@@ -46,7 +46,9 @@ export async function fetchPlayStyleAnalysis(
       err instanceof DOMException &&
       (err.name === "TimeoutError" || err.name === "AbortError")
     ) {
-      throw new Error("The AI analysis request timed out. Please retry.");
+      throw new Error("The AI analysis request timed out. Please retry.", {
+        cause: err,
+      });
     }
     throw err;
   }

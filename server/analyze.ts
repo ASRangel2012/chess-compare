@@ -12,6 +12,7 @@ import type {
   PlayerGameAnalysis,
   PlayStyleInsight,
 } from "../shared/contract";
+import { CHESSCOM_USERNAME_RE } from "../shared/contract";
 // Re-export so existing importers (and tests) can keep importing these from
 // this module, while the single definition lives in the shared contract.
 export type { AnalyzeBody, PlayerGameAnalysis, PlayStyleInsight };
@@ -27,6 +28,19 @@ export class TruncatedReplyError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "TruncatedReplyError";
+  }
+}
+
+/**
+ * Anthropic itself rate-limited (429) or shed (529 overloaded) the call — a
+ * temporary upstream condition, not a bug. Recognizable so the /api/analyze
+ * route maps it to a 503 + Retry-After (a back-off signal clients understand)
+ * instead of a generic 500 that reads like something broke.
+ */
+export class UpstreamUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UpstreamUnavailableError";
   }
 }
 
@@ -53,27 +67,88 @@ export interface ValidatedAnalyzeBody {
 }
 
 /**
+ * Upper bounds on everything interpolated into the prompt. The express.json
+ * body cap (1 MB) bounds *total* request size, but without per-field caps a
+ * direct API caller could stuff ~1 MB of attacker-chosen text into, say, an
+ * opening name — turning the proxy into a general-purpose LLM endpoint and
+ * burning input tokens. Real Chess.com data never approaches these limits.
+ */
+const MAX_OPENINGS = 100; // buildPrompt only reads the top 5 per color
+const MAX_GAME_LENGTH_BUCKETS = 20;
+const MAX_TIME_CLASSES = 20;
+const MAX_OPENING_NAME_LEN = 120;
+const MAX_ECO_LEN = 12;
+const MAX_BUCKET_LABEL_LEN = 60;
+const MAX_TIME_CLASS_KEY_LEN = 30;
+
+function isBoundedString(v: unknown, maxLen: number): v is string {
+  return typeof v === "string" && v.length <= maxLen;
+}
+
+/** An opening entry safe to interpolate: bounded strings, numeric stats. */
+function isPromptOpening(entry: unknown): boolean {
+  if (typeof entry !== "object" || entry === null) return false;
+  const o = entry as Record<string, unknown>;
+  return (
+    isBoundedString(o.name, MAX_OPENING_NAME_LEN) &&
+    isBoundedString(o.eco, MAX_ECO_LEN) &&
+    typeof o.games === "number" &&
+    typeof o.winRate === "number"
+  );
+}
+
+function isPromptGameLengthBucket(entry: unknown): boolean {
+  if (typeof entry !== "object" || entry === null) return false;
+  const o = entry as Record<string, unknown>;
+  return (
+    isBoundedString(o.label, MAX_BUCKET_LABEL_LEN) && typeof o.count === "number"
+  );
+}
+
+/** The whole object is JSON.stringify'd into the prompt, keys included. */
+function isPromptTimeClassBreakdown(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  return (
+    entries.length <= MAX_TIME_CLASSES &&
+    entries.every(
+      ([key, count]) =>
+        key.length <= MAX_TIME_CLASS_KEY_LEN && typeof count === "number"
+    )
+  );
+}
+
+/**
  * Deep shape check for a single player's analysis. Truthiness alone is not
  * enough: an empty object passes a truthy test but then explodes in buildPrompt
  * when it dereferences openingsAsWhite.slice(...) on undefined. We confirm the
- * fields buildPrompt actually reads are the right runtime types so a
- * malformed-but-present body is rejected with a 400 instead of throwing.
+ * fields buildPrompt actually reads are the right runtime types — and, because
+ * every string here ends up inside the Claude prompt, that array lengths and
+ * string lengths stay within the bounds above — so a malformed or oversized
+ * body is rejected with a 400 instead of throwing or spending tokens on it.
  */
 function isPromptPlayerAnalysis(a: unknown): a is PromptPlayerAnalysis {
   if (typeof a !== "object" || a === null) return false;
   const o = a as Record<string, unknown>;
   return (
     Array.isArray(o.openingsAsWhite) &&
+    o.openingsAsWhite.length <= MAX_OPENINGS &&
+    o.openingsAsWhite.every(isPromptOpening) &&
     Array.isArray(o.openingsAsBlack) &&
+    o.openingsAsBlack.length <= MAX_OPENINGS &&
+    o.openingsAsBlack.every(isPromptOpening) &&
     Array.isArray(o.gameLengthBuckets) &&
+    o.gameLengthBuckets.length <= MAX_GAME_LENGTH_BUCKETS &&
+    o.gameLengthBuckets.every(isPromptGameLengthBucket) &&
     typeof o.winRate === "number" &&
     typeof o.totalGames === "number" &&
     typeof o.wins === "number" &&
     typeof o.losses === "number" &&
     typeof o.draws === "number" &&
     typeof o.avgMoveCount === "number" &&
-    typeof o.timeClassBreakdown === "object" &&
-    o.timeClassBreakdown !== null
+    isPromptTimeClassBreakdown(o.timeClassBreakdown)
   );
 }
 
@@ -104,9 +179,14 @@ export function validateAnalyzeBody(body: unknown): Result<ValidatedAnalyzeBody>
   if (!hasAnalysisField(b.player1) || !hasAnalysisField(b.player2)) {
     return { ok: false, error: "Missing player analysis data" };
   }
+  // Names are interpolated into the prompt: enforce the Chess.com username
+  // format server-side (the client checks too, but a direct API caller could
+  // otherwise send arbitrary prompt text as a "name").
   if (
     typeof b.player1.name !== "string" ||
     typeof b.player2.name !== "string" ||
+    !CHESSCOM_USERNAME_RE.test(b.player1.name) ||
+    !CHESSCOM_USERNAME_RE.test(b.player2.name) ||
     !isPromptPlayerAnalysis(b.player1.analysis) ||
     !isPromptPlayerAnalysis(b.player2.analysis)
   ) {

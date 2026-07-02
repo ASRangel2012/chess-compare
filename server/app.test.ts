@@ -4,8 +4,13 @@ import type { AddressInfo } from "node:net";
 import { createApp, type AppDeps } from "./app";
 import { createRateLimiter, type RateLimiter } from "./rateLimit";
 import { createSemaphore } from "./semaphore";
+import { createMetrics } from "./metrics";
 import type { Logger } from "./logger";
-import { TruncatedReplyError, type PlayerGameAnalysis } from "./analyze";
+import {
+  TruncatedReplyError,
+  UpstreamUnavailableError,
+  type PlayerGameAnalysis,
+} from "./analyze";
 
 // A no-op logger so tests don't spam stdout.
 const noopLogger: Logger = {
@@ -57,6 +62,7 @@ async function start(overrides: Partial<AppDeps>): Promise<string> {
     rateLimiter: createRateLimiter({ windowMs: 60_000, max: 10 }),
     analyzeSemaphore: createSemaphore(4),
     logger: noopLogger,
+    metrics: createMetrics(),
     isProduction: false,
     trustProxy: false,
     distPath: "/tmp",
@@ -178,6 +184,23 @@ describe("POST /api/analyze", () => {
     expect(payload.error).not.toContain("4096");
   });
 
+  it("503 with Retry-After when Anthropic is rate limiting or overloaded", async () => {
+    // Regression: an upstream 429/529 used to surface as a generic 500 with a
+    // "failed, please retry" message — inviting immediate retries at exactly
+    // the moment the upstream is shedding load.
+    const base = await start({
+      createMessage: async () => {
+        throw new UpstreamUnavailableError("Anthropic returned 529");
+      },
+    });
+    const res = await post(base, validBody());
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBeTruthy();
+    const payload = (await res.json()) as { error: string };
+    expect(payload.error).toMatch(/overloaded/i);
+    expect(payload.error).not.toContain("529");
+  });
+
   it("503 with Retry-After when the analyze concurrency limit is saturated", async () => {
     // A createMessage we control: the first request parks inside the model
     // call, holding the single semaphore slot, while the second arrives.
@@ -244,17 +267,103 @@ describe("unknown /api routes", () => {
   });
 });
 
-describe("GET /api/health", () => {
-  it("reports hasApiKey=false without a key", async () => {
-    const base = await start({ createMessage: null });
-    const res = await fetch(`${base}/api/health`);
-    expect(await res.json()).toEqual({ ok: true, hasApiKey: false });
+describe("health endpoints", () => {
+  it.each(["/api/health", "/api/health/live", "/api/health/ready"])(
+    "GET %s returns 200 ok",
+    async (path) => {
+      const base = await start({ createMessage: null });
+      const res = await fetch(`${base}${path}`);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true });
+    }
+  );
+
+  it("does not expose API-key configuration, even when a key is present", async () => {
+    // Regression: /api/health used to serve hasApiKey to any caller — free
+    // recon for someone probing whether a deployment has a budget to burn.
+    const base = await start({ createMessage: async () => JSON.stringify(insight) });
+    for (const path of ["/api/health", "/api/health/live", "/api/health/ready"]) {
+      const body = await (await fetch(`${base}${path}`)).text();
+      expect(body).not.toContain("hasApiKey");
+    }
+  });
+});
+
+describe("GET /metrics", () => {
+  it("exposes request-duration series labeled by route and status", async () => {
+    const metrics = createMetrics();
+    const base = await start({ metrics });
+
+    await fetch(`${base}/api/health`);
+    const res = await fetch(`${base}/metrics`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/plain");
+    const body = await res.text();
+    expect(body).toContain(
+      'http_request_duration_seconds_count{method="GET",route="/api/health",status="200"} 1'
+    );
   });
 
-  it("reports hasApiKey=true with a key", async () => {
-    const base = await start({ createMessage: async () => JSON.stringify(insight) });
-    const res = await fetch(`${base}/api/health`);
-    expect(await res.json()).toEqual({ ok: true, hasApiKey: true });
+  it("collapses unknown paths to a bounded route label", async () => {
+    // A scanner spraying random URLs must not mint unbounded label values.
+    const metrics = createMetrics();
+    const base = await start({ metrics });
+
+    await fetch(`${base}/api/${"x".repeat(64)}`);
+    await fetch(`${base}/api/${"y".repeat(64)}`);
+    const body = await (await fetch(`${base}/metrics`)).text();
+    expect(body).toContain(
+      'http_request_duration_seconds_count{method="GET",route="/api/other",status="404"} 2'
+    );
+    expect(body).not.toContain("x".repeat(64));
+  });
+
+  it("counts per-IP rate-limit rejections", async () => {
+    const metrics = createMetrics();
+    const base = await start({
+      metrics,
+      createMessage: async () => JSON.stringify(insight),
+      rateLimiter: createRateLimiter({ windowMs: 60_000, max: 1 }),
+    });
+
+    await post(base, validBody()); // allowed
+    await post(base, validBody()); // 429
+    const body = await (await fetch(`${base}/metrics`)).text();
+    expect(body).toContain("rate_limit_hits_total 1");
+  });
+
+  it("counts shed requests and reports semaphore saturation", async () => {
+    const metrics = createMetrics();
+    const semaphore = createSemaphore(1);
+    metrics.registerAnalyzeInUseGauge(() => semaphore.inUse, semaphore.max);
+
+    let releaseFirst!: () => void;
+    const parked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const base = await start({
+      metrics,
+      analyzeSemaphore: semaphore,
+      createMessage: async () => {
+        await parked;
+        return JSON.stringify(insight);
+      },
+    });
+
+    const first = post(base, validBody());
+    await new Promise((r) => setTimeout(r, 50));
+    expect((await post(base, validBody())).status).toBe(503); // shed
+
+    // Scraped while the first call is still holding the slot.
+    const during = await (await fetch(`${base}/metrics`)).text();
+    expect(during).toContain("analyze_shed_total 1");
+    expect(during).toContain("analyze_semaphore_in_use 1");
+    expect(during).toContain("analyze_semaphore_max 1");
+
+    releaseFirst();
+    await first;
+    const after = await (await fetch(`${base}/metrics`)).text();
+    expect(after).toContain("analyze_semaphore_in_use 0");
   });
 });
 
@@ -277,6 +386,20 @@ describe("middleware", () => {
       headers: { "X-Request-Id": "z".repeat(500) },
     });
     expect(res.headers.get("x-request-id")).toBe("z".repeat(128));
+  });
+
+  it("replaces an inbound X-Request-Id with unsafe characters", async () => {
+    // Regression: the id was reflected after only a length cap, so quotes,
+    // spaces, or markup flowed into the response header and every structured
+    // log line for the request.
+    const base = await start({ createMessage: null });
+    const res = await fetch(`${base}/api/health`, {
+      headers: { "X-Request-Id": 'abc "def} <script>' },
+    });
+    expect(res.status).toBe(200);
+    const echoed = res.headers.get("x-request-id")!;
+    expect(echoed).not.toContain("abc");
+    expect(echoed).toMatch(/^[0-9a-f-]{36}$/); // a generated UUID instead
   });
 
   it("sets baseline security headers", async () => {

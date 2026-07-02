@@ -142,7 +142,9 @@ async function requestJson<T>(url: string, signal?: AbortSignal): Promise<T> {
         // recognize it and stay silent — it must never surface as a user error.
         if (signal?.aborted) throw err;
         // Otherwise it was our own timeout.
-        throw new Error("Chess.com request timed out. Please try again.");
+        throw new Error("Chess.com request timed out. Please try again.", {
+          cause: err,
+        });
       }
       throw err;
     } finally {

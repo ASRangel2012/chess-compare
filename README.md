@@ -15,7 +15,8 @@ Chess.com data (profiles, stats, PGN archives) is fetched **client-side** — th
 
 The backend only handles:
 - `POST /api/analyze` — sends aggregated game stats to Claude and returns play-style profiles (per-IP rate limited)
-- `GET /api/health` — health check for Docker
+- `GET /api/health/live` / `GET /api/health/ready` — liveness and readiness probes (`GET /api/health` is kept as a compatibility alias); neither leaks configuration detail
+- `GET /metrics` — Prometheus metrics for dashboards and alerts (request durations, Claude latency and token usage, rate-limit and load-shed counters, concurrency saturation)
 
 The Anthropic API key stays server-side and is never exposed to the browser. `/api/analyze` is rate limited (10 requests/min per IP, in-memory) so a public deployment can't be abused to burn your API budget. Independently of the per-IP limit, a global concurrency cap (`ANALYZE_MAX_CONCURRENT`, default 4) bounds simultaneous upstream Claude calls; when saturated the endpoint sheds load immediately with `503` + `Retry-After` instead of queueing.
 
@@ -24,10 +25,10 @@ The Anthropic API key stays server-side and is never exposed to the browser. `/a
 | Status | Meaning |
 |--------|---------|
 | `200` | Parsed play-style insight |
-| `400` | Missing or malformed player analysis in the request body |
+| `400` | Missing or malformed player analysis in the request body — including names that aren't valid Chess.com usernames or fields exceeding server-side size bounds (everything in the body is interpolated into the Claude prompt, so the server validates format and length itself rather than trusting the client) |
 | `429` | Per-IP rate limit exceeded (`Retry-After` header set) |
 | `502` | Upstream reply unusable — didn't parse/validate, or was **truncated** at the token cap (raise `ANTHROPIC_MAX_TOKENS`) |
-| `503` | No `ANTHROPIC_API_KEY` configured, or the global concurrency cap is saturated (`Retry-After` header set) |
+| `503` | No `ANTHROPIC_API_KEY` configured; the global concurrency cap is saturated; or Anthropic itself is rate limiting (429) / overloaded (529) — the latter two set `Retry-After` |
 | `500` | Any other upstream/internal failure |
 
 In **development**, Vite runs on `:5173` and proxies `/api` → Express on `:3001`.
@@ -94,35 +95,86 @@ Or use Docker (below). On a host (Render, Railway, Fly, a VPS, etc.), set
 it. A hosted instance lets reviewers try the AI analysis without supplying their own key —
 the key stays server-side, and the per-IP rate limit (10 req/min) guards the budget.
 
+## Kubernetes
+
+`k8s/` has ready-to-apply manifests: a Deployment (liveness/readiness probes on
+`/api/health/live` / `/api/health/ready`, resource requests/limits, and a
+`terminationGracePeriodSeconds` that outlasts the server's 10s forced-shutdown
+backstop so SIGTERM draining can finish), a ClusterIP Service, and a
+deliberately conservative HPA.
+
+Two things to know before applying:
+
+- **`CORS_ORIGIN` is required** — in production the server fails closed and
+  refuses to boot without an explicit allow-list. Edit the placeholder origin
+  in `k8s/deployment.yaml`.
+- **Scaling caveat** — the per-IP rate limiter and the analyze concurrency cap
+  are in-memory, i.e. *per pod*. Every extra replica multiplies both. See
+  the comments in `k8s/hpa.yaml` before raising `maxReplicas`.
+
+### Local cluster (kind)
+
+```bash
+kind create cluster
+docker build -t chess-compare:local .
+kind load docker-image chess-compare:local
+
+# Optional — without it the app runs in its documented no-AI degraded mode:
+kubectl create secret generic chess-compare \
+  --from-literal=ANTHROPIC_API_KEY=sk-ant-...
+
+kubectl apply -f k8s/
+kubectl rollout status deploy/chess-compare
+kubectl port-forward svc/chess-compare 3001:80
+```
+
+Open [http://localhost:3001](http://localhost:3001). For minikube, replace the
+image load step with `minikube image load chess-compare:local`.
+
+Prometheus can scrape `/metrics` via the pod annotations already set in the
+Deployment; if you put an Ingress in front, exclude `/metrics` from public
+routing.
+
+## Scaling limits
+
+Honest constraints of the current single-instance design, what breaks first,
+and what changes them:
+
+- **The per-IP rate limiter is in-memory and per process.** N replicas hand one
+  client N× the 10 req/min budget, and a rolling deploy resets every bucket.
+  It is also a fixed window, so a client can burst up to 2× across a window
+  boundary. When scaling out matters, move the buckets to a shared store
+  (Redis token bucket / sliding window) — the limiter is already an injected
+  factory (`server/rateLimit.ts`), so the swap stays contained.
+- **The analyze concurrency cap is per process.** The real ceiling on
+  simultaneous Claude calls — and on worst-case spend — is
+  replicas × `ANALYZE_MAX_CONCURRENT`. Budget it per replica, or enforce it in
+  a shared queue if the fleet grows.
+- **What saturates first at 10× traffic is the AI endpoint, by design.**
+  Chess.com data is fetched by each visitor's browser, so backend load is the
+  Claude proxy plus static files. Overload surfaces as shed 503s
+  (`analyze_shed_total`, `analyze_semaphore_in_use` pinned at `_max`) — alert
+  on those, raise `ANALYZE_MAX_CONCURRENT`/replicas deliberately, and mind the
+  spend multiplication above.
+
 ## IntelliJ IDEA / WebStorm
 
-The project includes shared run configurations in `.run/` and a WEB module in `.idea/`.
-
-### One-time setup
+IDE metadata (`.idea/`, `.run/`) is intentionally **not** committed — a fresh
+clone contains no IDE configuration. One-time setup:
 
 1. **Open the project** — File → Open → select the `chess-compare` folder.
-2. **Node.js** — Settings → Languages & Frameworks → Node.js  
-   Set the interpreter to your local Node 22+ install (or let IntelliJ download one).
-3. **Install dependencies** — open the built-in terminal and run:
-   ```bash
-   npm install
-   ```
-4. **Environment** — copy `.env.example` to `.env` and add your `ANTHROPIC_API_KEY`.  
-   The API server loads this automatically via `dotenv`.
+2. **Node.js** — Settings → Languages & Frameworks → Node.js: point the
+   interpreter at a local Node 22+ install.
+3. **Install dependencies** — `npm install` in the built-in terminal.
+4. **Environment** — copy `.env.example` to `.env` and add your
+   `ANTHROPIC_API_KEY` (optional; see "Running without an API key").
 
-### Run configurations (top-right dropdown)
+Then run everything through the npm scripts (see [Scripts](#scripts)):
+`npm run dev` is the one-command default (API + Vite with hot reload), and each
+script can be wrapped in an IDE run configuration if you prefer buttons.
 
-| Configuration | What it does |
-|---------------|--------------|
-| **Chess Compare - Dev (Compound)** *(default)* | Starts API server (`:3001`) and Vite (`:5173`) in separate run tabs |
-| **Chess Compare - Dev** | Single process via `concurrently` |
-| **Dev Server (API)** | Express/Claude proxy only |
-| **Dev Client (Vite)** | React frontend only (needs API running separately) |
-| **Production** | `npm run build` then serves UI + API on `:3001` |
-
-Use **Chess Compare - Dev (Compound)**, then open [http://localhost:5173](http://localhost:5173).
-
-TypeScript is split across `tsconfig.app.json` (React `src/`) and `tsconfig.node.json` (`server/` + Vite config) so IntelliJ resolves both correctly.
+TypeScript is split across `tsconfig.app.json` (React `src/`) and
+`tsconfig.node.json` (`server/` + Vite config) so the IDE resolves both.
 
 ## Docker
 
@@ -151,8 +203,29 @@ docker run -p 3001:3001 -e ANTHROPIC_API_KEY=sk-ant-... chess-compare
 | `npm start` | Run production server (serves UI + API) |
 | `npm run prod` | Build + start (used by IntelliJ **Production** run config) |
 | `npm run typecheck` | Type-check the project (`tsc -b`) |
+| `npm run lint` | ESLint (flat config) over client, server, shared, and scripts |
 | `npm test` | Run the Vitest unit suite |
 | `npm run test:watch` | Run Vitest in watch mode |
+
+## Observability
+
+The server emits structured JSON logs (one line per request with a request id,
+status, and duration; every Claude call logs latency, token usage, and stop
+reason) and serves Prometheus metrics at `GET /metrics` (text exposition,
+dependency-free — see `server/metrics.ts`):
+
+| Metric | Type | Use |
+|--------|------|-----|
+| `http_request_duration_seconds{method,route,status}` | histogram | per-route latency/error-rate SLOs |
+| `anthropic_request_duration_seconds{outcome}`, `anthropic_requests_total{outcome}` | histogram + counter | Claude latency and failure rate |
+| `anthropic_input_tokens` / `anthropic_output_tokens` | histograms | token spend distribution over time |
+| `rate_limit_hits_total` | counter | per-IP abuse pressure (429s) |
+| `analyze_shed_total`, `analyze_semaphore_in_use` / `_max` | counter + gauges | load shedding & saturation — alert when `in_use` pins at `max` |
+
+Route labels collapse to a fixed set (`/api/analyze`, `/api/health`, `/metrics`,
+`/api/other`, `spa`) so a scanner spraying URLs can't mint unbounded time
+series. On a public deployment keep `/metrics` internal: scrape it over the pod
+network and exclude the path at your ingress.
 
 ## Testing & CI
 
@@ -168,6 +241,10 @@ They cover:
 - **Chess engine** (`chess.ts`) — replaying famous games move-by-move, including castling, en passant, promotion, explicit disambiguation, and the implicit *disambiguation-by-pin* case (king-safety fallback); plus no-silent-truncation regressions (every parsed SAN must apply, corrupt/ambiguous SAN flags `truncated`) and the bounded PGN-token memo cache.
 - **Network layer** — mocked-`fetch` tests for the archive fetcher's concurrency limit, caching, early-stop, newest-first ordering, cancellation (abort mid-scan stops further fetches and doesn't poison the cache), and month-boundary cache behavior with an injected clock.
 - **Comparison orchestration** (`compare.ts`, `progressiveLoad.ts`) — `Promise.allSettled` profile resolution, precise error mapping, AbortSignal threading, the stale-run race, and AI-vs-comparison error routing, tested with injected fakes (no network, no DOM).
+- **Components** (`GameViewer`, `PlayStyleAnalysis`, `GamePlan`) — jsdom render tests for the replay controls (clamping, move-list jumps, reset on new game, the truncation warning) and the AI cards' loading/error/retry/empty states.
 - **Server** (`analyze.ts`, `rateLimit.ts`, `semaphore.ts`, `app.ts`) — request validation, model-output parsing/shape-validation, the rate limiter, the concurrency semaphore, and the `/api/analyze` endpoint end-to-end with an injected Claude stub (503 / 400 / 429 / 502 truncation & parse / 200 paths).
 
-`.github/workflows/ci.yml` runs type-checking, the unit suite, and the production build on Node 22 (matching the Docker base image) for every push and pull request.
+`.github/workflows/ci.yml` runs two jobs on every push and pull request: lint,
+type-check, unit suite, production build, and a production-dependency audit on
+Node 22 (matching the Docker base image); and a Docker job that builds the
+image and smoke-tests the booted container against `/api/health/live`.

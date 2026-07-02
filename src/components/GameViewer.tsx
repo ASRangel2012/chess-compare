@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import {
   IconPlayerTrackPrev,
   IconChevronLeft,
@@ -31,8 +31,15 @@ export function GameViewer({
   const { plies, truncated, failedSan } = useMemo(() => replayGame(pgn), [pgn]);
   const [index, setIndex] = useState(0);
 
-  // Reset to the start whenever a different game is loaded.
-  useEffect(() => setIndex(0), [pgn]);
+  // Reset to the start whenever a different game is loaded. Adjusting state
+  // during render (the react.dev-documented pattern) instead of in an effect:
+  // the effect version committed one frame of the OLD index against the NEW
+  // game before resetting, and react-hooks/set-state-in-effect flags it.
+  const [prevPgn, setPrevPgn] = useState(pgn);
+  if (prevPgn !== pgn) {
+    setPrevPgn(pgn);
+    setIndex(0);
+  }
 
   const maxIndex = plies.length - 1;
   const clamp = (i: number) => Math.max(0, Math.min(maxIndex, i));

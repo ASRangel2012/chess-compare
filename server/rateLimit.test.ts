@@ -40,7 +40,7 @@ function fakeRes(): FakeRes {
 
 describe("createRateLimiter", () => {
   it("allows up to `max` requests then returns 429 with Retry-After", () => {
-    let clock = 0;
+    const clock = 0;
     const limiter = createRateLimiter({ windowMs: 1000, max: 3, now: () => clock });
 
     const hit = () => {
@@ -64,7 +64,7 @@ describe("createRateLimiter", () => {
   });
 
   it("tracks each IP independently", () => {
-    let clock = 0;
+    const clock = 0;
     const limiter = createRateLimiter({ windowMs: 1000, max: 1, now: () => clock });
 
     const hit = (ip: string) => {
