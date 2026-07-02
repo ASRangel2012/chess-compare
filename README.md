@@ -28,7 +28,7 @@ The Anthropic API key stays server-side and is never exposed to the browser. `/a
 | `400` | Missing or malformed player analysis in the request body — including names that aren't valid Chess.com usernames or fields exceeding server-side size bounds (everything in the body is interpolated into the Claude prompt, so the server validates format and length itself rather than trusting the client) |
 | `429` | Per-IP rate limit exceeded (`Retry-After` header set) |
 | `502` | Upstream reply unusable — didn't parse/validate, or was **truncated** at the token cap (raise `ANTHROPIC_MAX_TOKENS`) |
-| `503` | No `ANTHROPIC_API_KEY` configured, or the global concurrency cap is saturated (`Retry-After` header set) |
+| `503` | No `ANTHROPIC_API_KEY` configured; the global concurrency cap is saturated; or Anthropic itself is rate limiting (429) / overloaded (529) — the latter two set `Retry-After` |
 | `500` | Any other upstream/internal failure |
 
 In **development**, Vite runs on `:5173` and proxies `/api` → Express on `:3001`.

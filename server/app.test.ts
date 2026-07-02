@@ -6,7 +6,11 @@ import { createRateLimiter, type RateLimiter } from "./rateLimit";
 import { createSemaphore } from "./semaphore";
 import { createMetrics } from "./metrics";
 import type { Logger } from "./logger";
-import { TruncatedReplyError, type PlayerGameAnalysis } from "./analyze";
+import {
+  TruncatedReplyError,
+  UpstreamUnavailableError,
+  type PlayerGameAnalysis,
+} from "./analyze";
 
 // A no-op logger so tests don't spam stdout.
 const noopLogger: Logger = {
@@ -178,6 +182,23 @@ describe("POST /api/analyze", () => {
     expect(payload.error).toMatch(/ANTHROPIC_MAX_TOKENS/);
     // The internal token-count detail is not echoed verbatim.
     expect(payload.error).not.toContain("4096");
+  });
+
+  it("503 with Retry-After when Anthropic is rate limiting or overloaded", async () => {
+    // Regression: an upstream 429/529 used to surface as a generic 500 with a
+    // "failed, please retry" message — inviting immediate retries at exactly
+    // the moment the upstream is shedding load.
+    const base = await start({
+      createMessage: async () => {
+        throw new UpstreamUnavailableError("Anthropic returned 529");
+      },
+    });
+    const res = await post(base, validBody());
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBeTruthy();
+    const payload = (await res.json()) as { error: string };
+    expect(payload.error).toMatch(/overloaded/i);
+    expect(payload.error).not.toContain("529");
   });
 
   it("503 with Retry-After when the analyze concurrency limit is saturated", async () => {

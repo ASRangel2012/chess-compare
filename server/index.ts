@@ -6,7 +6,7 @@ import { createApp } from "./app";
 import { createRateLimiter } from "./rateLimit";
 import { createSemaphore } from "./semaphore";
 import { createMetrics } from "./metrics";
-import { TruncatedReplyError } from "./analyze";
+import { TruncatedReplyError, UpstreamUnavailableError } from "./analyze";
 import { logger, serializeError } from "./logger";
 import { resolveCorsOptions } from "./corsConfig";
 import { parseTrustProxy } from "./trustProxy";
@@ -96,6 +96,17 @@ const createMessage = anthropic
         // A failed or timed-out call still spent real wall-clock time — record
         // it so upstream failures show up in latency dashboards, not just logs.
         metrics.observeAnthropicCall("error", (Date.now() - startedAt) / 1000);
+        // 429 (rate limited) and 529 (overloaded) are Anthropic telling us to
+        // back off — map them to the recognizable error the route turns into
+        // a 503 + Retry-After instead of a generic 500.
+        if (
+          err instanceof Anthropic.APIError &&
+          (err.status === 429 || err.status === 529)
+        ) {
+          throw new UpstreamUnavailableError(
+            `Anthropic returned ${err.status}`
+          );
+        }
         throw err;
       }
 

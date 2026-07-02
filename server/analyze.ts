@@ -32,6 +32,19 @@ export class TruncatedReplyError extends Error {
 }
 
 /**
+ * Anthropic itself rate-limited (429) or shed (529 overloaded) the call — a
+ * temporary upstream condition, not a bug. Recognizable so the /api/analyze
+ * route maps it to a 503 + Retry-After (a back-off signal clients understand)
+ * instead of a generic 500 that reads like something broke.
+ */
+export class UpstreamUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UpstreamUnavailableError";
+  }
+}
+
+/**
  * The subset of PlayerGameAnalysis the prompt actually reads — and therefore
  * everything the server validates and requires. The client's wire type
  * (AnalyzeBody) also carries `username` and `commonOpenings`, but the server

@@ -12,6 +12,7 @@ import {
   buildPrompt,
   extractAnalysisJson,
   TruncatedReplyError,
+  UpstreamUnavailableError,
 } from "./analyze";
 
 export interface AppDeps {
@@ -201,6 +202,20 @@ export function createApp(deps: AppDeps): express.Express {
           return res.status(502).json({
             error:
               "The AI reply was cut off before it finished. Raise ANTHROPIC_MAX_TOKENS on the server and retry.",
+          });
+        }
+        if (err instanceof UpstreamUnavailableError) {
+          // Anthropic is rate limiting or overloaded. Retryable and temporary:
+          // 503 + Retry-After tells well-behaved clients to back off, where a
+          // generic 500 invites immediate manual retries (a retry storm at
+          // exactly the moment the upstream is shedding load).
+          log.warn("upstream rate limited/overloaded", {
+            err: serializeError(err),
+          });
+          res.setHeader("Retry-After", "30");
+          return res.status(503).json({
+            error:
+              "The AI service is temporarily overloaded. Please retry in a moment.",
           });
         }
         // Log the detail, return a generic message (mirrors the 502 parse path):
