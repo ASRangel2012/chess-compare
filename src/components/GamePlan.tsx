@@ -35,7 +35,7 @@ export function GamePlan({
       <div className="card">
         <div className="empty-state">
           <IconTargetArrow size={40} />
-          <p>
+          <p role={error ? "alert" : undefined}>
             {error ??
               "The game plan is generated alongside the AI analysis — it needs the backend server with an Anthropic API key."}
           </p>

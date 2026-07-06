@@ -1,4 +1,4 @@
-import { useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useEffect, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import {
   IconPlayerTrackPrev,
   IconChevronLeft,
@@ -15,6 +15,13 @@ interface GameViewerProps {
   whiteLabel?: string;
   blackLabel?: string;
 }
+
+/**
+ * How long the position must be stable before the live region announces it.
+ * Longer than one key-repeat interval (~30ms), far shorter than a deliberate
+ * pause — so held-arrow stepping coalesces to one announcement.
+ */
+const ANNOUNCE_DEBOUNCE_MS = 150;
 
 /** "12. Nxe5" / "12… Nxe5" style label for a ply, or "Start" for ply 0. */
 function plyLabel(ply: { san: string | null; moveNumber: number; movedBy: "w" | "b" | null }): string {
@@ -43,8 +50,13 @@ export function GameViewer({
 
   const maxIndex = plies.length - 1;
   const clamp = (i: number) => Math.max(0, Math.min(maxIndex, i));
-  // Clamp on render too, so a stale index (e.g. mid game-switch) can never
-  // index past the end of the ply list and crash.
+  // Defensive invariant, not a live hazard: every setter in this component
+  // clamps against the current game's maxIndex, and the render-phase reset
+  // above runs before any child renders, so `index` cannot exceed `maxIndex`
+  // through any current code path. The clamp is a fossil of the effect-era
+  // reset (which really did commit one stale frame against the new game) and
+  // is kept only as cheap insurance against a future unbounded setter — e.g.
+  // a deep-linked ply index arriving from a URL param.
   const safeIndex = clamp(index);
   const current = plies[safeIndex];
   const lastMove = current.lastMove;
@@ -66,6 +78,20 @@ export function GameViewer({
     }
   };
 
+  // Debounced copy of the current ply label for the aria-live region. The
+  // naive version updated the region on every render: under arrow-key
+  // auto-repeat that enqueues ~30 announcements/sec of positions the user has
+  // already left, and screen readers dutifully read the backlog. Announce only
+  // the position the user settles on.
+  const [announcedLabel, setAnnouncedLabel] = useState(() => plyLabel(plies[0]));
+  useEffect(() => {
+    const t = setTimeout(
+      () => setAnnouncedLabel(plyLabel(current)),
+      ANNOUNCE_DEBOUNCE_MS
+    );
+    return () => clearTimeout(t);
+  }, [current]);
+
   const sideToMove = current.movedBy === "w" ? "Black" : "White";
   const boardLabel =
     safeIndex === 0
@@ -73,7 +99,16 @@ export function GameViewer({
       : `Position after ${plyLabel(current)}, ${sideToMove} to move`;
 
   return (
-    <div className="game-viewer" tabIndex={0} onKeyDown={onKeyDown}>
+    // The container is keyboard-focusable for arrow-key stepping, so it needs
+    // a role and an accessible name — a bare tabIndex={0} div announces as an
+    // unnamed, purposeless stop to screen readers.
+    <div
+      className="game-viewer"
+      role="group"
+      aria-label="Game replay viewer. Use the left and right arrow keys to step through moves."
+      tabIndex={0}
+      onKeyDown={onKeyDown}
+    >
       <div className="game-viewer-board-col">
         <div className="board-edge-label">{orientation === "white" ? blackLabel : whiteLabel}</div>
         <div className="chess-board" role="img" aria-label={boardLabel}>
@@ -132,9 +167,10 @@ export function GameViewer({
           </button>
         </div>
 
-        {/* Announce the current move to screen readers as the user steps through. */}
+        {/* Announce the current move to screen readers as the user steps
+            through — debounced so held-key stepping doesn't flood the queue. */}
         <span className="visually-hidden" aria-live="polite">
-          {plyLabel(current)}
+          {announcedLabel}
         </span>
 
         <ol className="move-list">

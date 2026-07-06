@@ -101,7 +101,10 @@ export function ChessCompare() {
             placeholder="e.g. hikaru"
             value={player1}
             onChange={(e) => setPlayer1(e.target.value)}
-            disabled={loading}
+            // readOnly, not disabled: disabling the focused input ejects
+            // keyboard/screen-reader focus to <body> mid-task. readOnly keeps
+            // the field focusable and announced while still blocking edits.
+            readOnly={loading}
             autoComplete="off"
           />
         </div>
@@ -116,7 +119,7 @@ export function ChessCompare() {
             placeholder="e.g. magnuscarlsen"
             value={player2}
             onChange={(e) => setPlayer2(e.target.value)}
-            disabled={loading}
+            readOnly={loading}
             autoComplete="off"
           />
         </div>
@@ -130,7 +133,13 @@ export function ChessCompare() {
         </button>
       </form>
 
-      {error && <div className="alert alert-error">{error}</div>}
+      {/* role="alert" announces the failure to screen readers — without it
+          the error rendered silently while focus sat elsewhere. */}
+      {error && (
+        <div className="alert alert-error" role="alert">
+          {error}
+        </div>
+      )}
 
       {loading && (
         <div className="loading-bar">

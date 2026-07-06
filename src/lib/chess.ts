@@ -163,13 +163,33 @@ function applySan(state: State, sanRaw: string): { state: State; from: number; t
   const san = sanRaw.replace(/[+#!?]/g, "");
   const board2 = board.slice();
 
-  // Castling.
+  // Castling. Every other move type resolves through the candidate machinery
+  // below, which throws on a source square that doesn't hold the right piece —
+  // castling used to be the one path that wrote to the board unconditionally,
+  // so a corrupt "O-O" (king already moved, squares occupied) silently
+  // fabricated a position the input never described, even overwriting whatever
+  // sat on the king's or rook's target square. Guard the same invariant here:
+  // the king and rook must be on their home squares and every square they
+  // touch must be empty. (Full legality — castling rights, moving through
+  // check — stays out of scope for a replayer of already-adjudicated games;
+  // these checks only reject SANs that cannot be executed *mechanically*.)
   if (san === "O-O" || san === "O-O-O") {
     const rank = turn === "w" ? 0 : 7;
     const kingFrom = sq(4, rank);
     const kingTo = san === "O-O" ? sq(6, rank) : sq(2, rank);
     const rookFrom = san === "O-O" ? sq(7, rank) : sq(0, rank);
     const rookTo = san === "O-O" ? sq(5, rank) : sq(3, rank);
+    const kingChar = turn === "w" ? "K" : "k";
+    const rookChar = turn === "w" ? "R" : "r";
+    const between =
+      san === "O-O" ? [sq(5, rank), sq(6, rank)] : [sq(1, rank), sq(2, rank), sq(3, rank)];
+    if (
+      board2[kingFrom] !== kingChar ||
+      board2[rookFrom] !== rookChar ||
+      between.some((s) => board2[s] !== null)
+    ) {
+      throw new Error(`Illegal castling: ${sanRaw}`);
+    }
     board2[kingTo] = board2[kingFrom];
     board2[kingFrom] = null;
     board2[rookTo] = board2[rookFrom];
