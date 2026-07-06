@@ -21,7 +21,11 @@ const HTTP_DURATION_BUCKETS = [
 ];
 // The Claude call is orders of magnitude slower than local routes and is
 // bounded by ANTHROPIC_TIMEOUT_MS (default 90s), so its buckets skew long.
-const ANTHROPIC_DURATION_BUCKETS = [0.5, 1, 2.5, 5, 10, 20, 30, 60, 90, 120];
+// The 45 edge exists because production Sonnet calls land in the 40-60s
+// range: without it they all pooled in one 30s-wide (30, 60] bucket, and
+// histogram_quantile could only interpolate — i.e. guess — inside it.
+// Buckets follow observed latency and SLO thresholds, not round numbers.
+const ANTHROPIC_DURATION_BUCKETS = [0.5, 1, 2.5, 5, 10, 20, 30, 45, 60, 90, 120];
 const TOKEN_BUCKETS = [128, 256, 512, 1024, 2048, 4096, 8192, 16384];
 
 type LabelPairs = [name: string, value: string][];
