@@ -46,6 +46,15 @@ describe("createMetrics", () => {
     expect(valueOf(out, 'anthropic_requests_total{outcome="error"}')).toBe(1);
     expect(valueOf(out, 'anthropic_request_duration_seconds_count{outcome="success"}')).toBe(1);
     expect(valueOf(out, 'anthropic_request_duration_seconds_count{outcome="error"}')).toBe(1);
+    // A 52s call (observed Sonnet latency) must be distinguishable from the
+    // 30s edge: it lands in le=60 but NOT le=45 — the bucket added so real
+    // traffic doesn't pool in one 30s-wide bucket that quantiles can only
+    // interpolate across.
+    m.observeAnthropicCall("success", 52.5);
+    const out2 = m.render();
+    expect(valueOf(out2, 'anthropic_request_duration_seconds_bucket{outcome="success",le="45"}')).toBe(1); // only the 12s call
+    expect(valueOf(out2, 'anthropic_request_duration_seconds_bucket{outcome="success",le="60"}')).toBe(2);
+
     // 900 input tokens land in the le=1024 bucket; the failed call adds none.
     expect(valueOf(out, 'anthropic_input_tokens_bucket{le="1024"}')).toBe(1);
     expect(valueOf(out, "anthropic_input_tokens_count")).toBe(1);
