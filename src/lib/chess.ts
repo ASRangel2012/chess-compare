@@ -262,7 +262,6 @@ function applySan(state: State, sanRaw: string): { state: State; from: number; t
     }
   }
 
-  // Execute the move.
   board2[to] = promo ? (turn === "w" ? promo : promo.toLowerCase()) : board2[from];
   board2[from] = null;
   if (epCapture) {

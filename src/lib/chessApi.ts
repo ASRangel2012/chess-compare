@@ -359,7 +359,7 @@ export async function fetchRecentGames(
       for (let g = monthly.length - 1; g >= 0; g--) {
         games.push(monthly[g]);
       }
-      return games.length < maxGames; // keep scanning until we have enough
+      return games.length < maxGames;
     },
     opts
   );
