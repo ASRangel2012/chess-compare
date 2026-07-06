@@ -28,7 +28,7 @@ COPY --from=build /app/dist-server ./dist-server
 # Drop root: the server only needs to read /app and bind a non-privileged
 # port. The node user ships with the base image; k8s runAsNonRoot and most
 # admission policies reject root containers.
-USER node
+USER 1000
 
 EXPOSE 3001
 
