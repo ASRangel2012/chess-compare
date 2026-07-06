@@ -41,7 +41,7 @@ export function PlayStyleAnalysis({
       <div className="card">
         <div className="empty-state">
           <IconSparkles size={40} />
-          <p>
+          <p role={error ? "alert" : undefined}>
             {error ??
               "AI analysis requires the backend server with an Anthropic API key."}
           </p>

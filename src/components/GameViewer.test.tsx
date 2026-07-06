@@ -14,6 +14,18 @@ const board = () => screen.getByRole("img");
 const button = (label: string) => screen.getByRole("button", { name: label });
 
 describe("GameViewer", () => {
+  it("exposes the viewer as a named, focusable group (a11y regression)", () => {
+    // A bare tabIndex={0} div announces as an unnamed stop to screen readers.
+    render(<GameViewer pgn={SCHOLARS_MATE} />);
+    const viewer = screen.getByRole("group", { name: /game replay/i });
+    expect(viewer.getAttribute("tabindex")).toBe("0");
+    viewer.focus();
+    expect(document.activeElement).toBe(viewer);
+    // Arrow keys must work on the focused container itself.
+    fireEvent.keyDown(viewer, { key: "ArrowRight" });
+    expect(board().getAttribute("aria-label")).toContain("e4");
+  });
+
   it("starts at the initial position with the back controls disabled", () => {
     render(<GameViewer pgn={SCHOLARS_MATE} />);
     expect(board().getAttribute("aria-label")).toBe(

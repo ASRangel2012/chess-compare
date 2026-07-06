@@ -43,8 +43,13 @@ export function GameViewer({
 
   const maxIndex = plies.length - 1;
   const clamp = (i: number) => Math.max(0, Math.min(maxIndex, i));
-  // Clamp on render too, so a stale index (e.g. mid game-switch) can never
-  // index past the end of the ply list and crash.
+  // Defensive invariant, not a live hazard: every setter in this component
+  // clamps against the current game's maxIndex, and the render-phase reset
+  // above runs before any child renders, so `index` cannot exceed `maxIndex`
+  // through any current code path. The clamp is a fossil of the effect-era
+  // reset (which really did commit one stale frame against the new game) and
+  // is kept only as cheap insurance against a future unbounded setter — e.g.
+  // a deep-linked ply index arriving from a URL param.
   const safeIndex = clamp(index);
   const current = plies[safeIndex];
   const lastMove = current.lastMove;
@@ -73,7 +78,16 @@ export function GameViewer({
       : `Position after ${plyLabel(current)}, ${sideToMove} to move`;
 
   return (
-    <div className="game-viewer" tabIndex={0} onKeyDown={onKeyDown}>
+    // The container is keyboard-focusable for arrow-key stepping, so it needs
+    // a role and an accessible name — a bare tabIndex={0} div announces as an
+    // unnamed, purposeless stop to screen readers.
+    <div
+      className="game-viewer"
+      role="group"
+      aria-label="Game replay viewer. Use the left and right arrow keys to step through moves."
+      tabIndex={0}
+      onKeyDown={onKeyDown}
+    >
       <div className="game-viewer-board-col">
         <div className="board-edge-label">{orientation === "white" ? blackLabel : whiteLabel}</div>
         <div className="chess-board" role="img" aria-label={boardLabel}>
