@@ -217,7 +217,19 @@ async function fetchJson<T>(url: string, opts: FetchOptions = {}): Promise<T> {
 
   const key = opts.cacheKey ?? url;
   const cached = cacheGet(key);
-  if (cached) return cached as Promise<T>;
+  if (cached) {
+    try {
+      return (await cached) as T;
+    } catch (err) {
+      // A shared in-flight promise settles once, for everyone — including
+      // with the *originating* run's AbortError. That abort is foreign to
+      // this caller, whose own signal may be perfectly live; inheriting it
+      // would silently kill a run the user never cancelled. Treat a foreign
+      // abort as a cache miss and fetch fresh under our own signal. Real
+      // failures (and our own aborts) rethrow unchanged.
+      if (!isAbortError(err) || opts.signal?.aborted) throw err;
+    }
+  }
 
   const promise = requestJson<T>(url, opts.signal);
   cacheSet(key, promise);

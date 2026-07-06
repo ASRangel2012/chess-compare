@@ -348,6 +348,45 @@ describe("chessApi network resilience", () => {
 describe("chessApi cancellation", () => {
   afterEach(() => vi.restoreAllMocks());
 
+  it("a foreign abort on a shared cached promise is retried, not inherited", async () => {
+    // Two runs share one cached in-flight promise. When run 1 aborts, the
+    // shared promise rejects with run 1's AbortError — run 2, whose signal is
+    // live, must not inherit that cancellation. It should re-fetch instead.
+    let calls = 0;
+    const payload = { archives: [] as string[] };
+    const fetchMock = vi.fn((_url: string, fetchOpts: { signal: AbortSignal }) => {
+      calls++;
+      if (calls === 1) {
+        return new Promise<Response>((_resolve, reject) => {
+          fetchOpts.signal.addEventListener("abort", () =>
+            reject(new DOMException("aborted", "AbortError"))
+          );
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        json: async () => payload,
+      } as unknown as Response);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const run1Controller = new AbortController();
+    const run2Controller = new AbortController();
+    const run1 = fetchArchives("shareduser-foreignabort", {
+      signal: run1Controller.signal,
+    });
+    const run2 = fetchArchives("shareduser-foreignabort", {
+      signal: run2Controller.signal,
+    });
+
+    run1Controller.abort();
+    await expect(run1).rejects.toSatisfy(isAbortError); // own abort: propagates
+    await expect(run2).resolves.toEqual([]); // foreign abort: retried
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   /** fetch mock: archives resolve instantly; monthly requests hang until aborted. */
   function installAbortableFetch(user: string, months: number) {
     const urls = archiveUrls(user, months);
