@@ -1,5 +1,6 @@
 import express from "express";
 import cors from "cors";
+import fs from "fs";
 import path from "path";
 import { randomUUID } from "node:crypto";
 import type { Logger } from "./logger";
@@ -286,8 +287,18 @@ export function createApp(deps: AppDeps): express.Express {
 
   if (deps.isProduction) {
     app.use(express.static(deps.distPath));
+    // SPA fallback. The shell is read ONCE at startup and served from memory:
+    // it is a fixed file that only changes on deploy, and sendFile here was a
+    // per-request filesystem access on an unthrottled route (flagged by
+    // CodeQL js/missing-rate-limiting). Serving from memory removes the fs
+    // access instead of rate-limiting deep links — throttling the SPA shell
+    // punishes users behind shared IPs, and volumetric DoS protection for
+    // static content belongs at the ingress/CDN, not in-process. A missing
+    // build now fails at boot (fail closed, like the production CORS check)
+    // rather than 500ing per request at runtime.
+    const spaShell = fs.readFileSync(path.join(deps.distPath, "index.html"));
     app.get("*", (_req, res) => {
-      res.sendFile(path.join(deps.distPath, "index.html"));
+      res.type("html").send(spaShell);
     });
   }
 

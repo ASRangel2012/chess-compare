@@ -1,4 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createApp, type AppDeps } from "./app";
@@ -412,5 +415,40 @@ describe("middleware", () => {
     expect(csp).toContain("https://api.chess.com");
     expect(csp).toContain("https://*.chesscomfiles.com");
     expect(res.headers.get("strict-transport-security")).toContain("max-age=");
+  });
+});
+
+describe("production SPA fallback", () => {
+  it("serves the shell from memory for deep links and fails boot without a build", async () => {
+    // Real dist dir with a shell: any non-API path gets the in-memory copy.
+    const dist = mkdtempSync(join(tmpdir(), "dist-"));
+    writeFileSync(join(dist, "index.html"), "<!doctype html><title>shell</title>");
+    const base = await start({ isProduction: true, distPath: dist });
+
+    const res = await fetch(`${base}/some/client/route`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/html");
+    expect(await res.text()).toContain("shell");
+
+    // API 404s must still not fall through to the shell.
+    const api = await fetch(`${base}/api/nope`);
+    expect(api.status).toBe(404);
+    expect(((await api.json()) as { error: string }).error).toBe("Not found");
+  });
+
+  it("fails at boot when the build is missing (fail closed)", () => {
+    const empty = mkdtempSync(join(tmpdir(), "empty-dist-"));
+    expect(() =>
+      createApp({
+        createMessage: null,
+        rateLimiter: createRateLimiter({ windowMs: 60_000, max: 10 }),
+        analyzeSemaphore: createSemaphore(4),
+        logger: noopLogger,
+        metrics: createMetrics(),
+        isProduction: true,
+        trustProxy: false,
+        distPath: empty,
+      })
+    ).toThrow(/ENOENT/);
   });
 });
