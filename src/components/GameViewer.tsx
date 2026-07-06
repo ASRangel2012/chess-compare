@@ -1,4 +1,4 @@
-import { useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useEffect, useMemo, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import {
   IconPlayerTrackPrev,
   IconChevronLeft,
@@ -15,6 +15,13 @@ interface GameViewerProps {
   whiteLabel?: string;
   blackLabel?: string;
 }
+
+/**
+ * How long the position must be stable before the live region announces it.
+ * Longer than one key-repeat interval (~30ms), far shorter than a deliberate
+ * pause — so held-arrow stepping coalesces to one announcement.
+ */
+const ANNOUNCE_DEBOUNCE_MS = 150;
 
 /** "12. Nxe5" / "12… Nxe5" style label for a ply, or "Start" for ply 0. */
 function plyLabel(ply: { san: string | null; moveNumber: number; movedBy: "w" | "b" | null }): string {
@@ -70,6 +77,20 @@ export function GameViewer({
       e.preventDefault();
     }
   };
+
+  // Debounced copy of the current ply label for the aria-live region. The
+  // naive version updated the region on every render: under arrow-key
+  // auto-repeat that enqueues ~30 announcements/sec of positions the user has
+  // already left, and screen readers dutifully read the backlog. Announce only
+  // the position the user settles on.
+  const [announcedLabel, setAnnouncedLabel] = useState(() => plyLabel(plies[0]));
+  useEffect(() => {
+    const t = setTimeout(
+      () => setAnnouncedLabel(plyLabel(current)),
+      ANNOUNCE_DEBOUNCE_MS
+    );
+    return () => clearTimeout(t);
+  }, [current]);
 
   const sideToMove = current.movedBy === "w" ? "Black" : "White";
   const boardLabel =
@@ -146,9 +167,10 @@ export function GameViewer({
           </button>
         </div>
 
-        {/* Announce the current move to screen readers as the user steps through. */}
+        {/* Announce the current move to screen readers as the user steps
+            through — debounced so held-key stepping doesn't flood the queue. */}
         <span className="visually-hidden" aria-live="polite">
-          {plyLabel(current)}
+          {announcedLabel}
         </span>
 
         <ol className="move-list">
