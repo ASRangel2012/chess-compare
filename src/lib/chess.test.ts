@@ -179,6 +179,31 @@ describe("replayGame — no silent truncation (regression)", () => {
     expect(failedSan).toBe("Nf6");
   });
 
+  it("throws (as truncation) on castling with the king off its home square", () => {
+    // After 2.Ke2 the white king sits on e2. "O-O" used to execute four
+    // unconditional board writes: it copied e1 (empty) onto g1 — deleting the
+    // g1 knight — and moved the h1 rook onto f1 — deleting the bishop. The
+    // replay then continued on a board the game never described.
+    const { plies, truncated, failedSan } = replayGame("1. e4 e5 2. Ke2 Nf6 3. O-O");
+    expect(truncated).toBe(true);
+    expect(failedSan).toBe("O-O");
+    expect(plies.length - 1).toBe(4); // e4, e5, Ke2, Nf6 applied — nothing after
+    const last = plies[plies.length - 1].board;
+    expect(last[idx("g1")]).toBe("N"); // knight not silently deleted
+    expect(last[idx("f1")]).toBe("B"); // bishop not silently overwritten
+    expect(last[idx("h1")]).toBe("R"); // rook not silently moved
+  });
+
+  it("throws (as truncation) on castling through occupied squares", () => {
+    // From the start position f1/g1 are occupied; "1. O-O" is mechanically
+    // impossible and must stop the replay with the board untouched.
+    const { plies, truncated, failedSan } = replayGame("1. O-O e5");
+    expect(truncated).toBe(true);
+    expect(failedSan).toBe("O-O");
+    expect(plies).toHaveLength(1); // only the start position
+    expect(plies[0].board[idx("g1")]).toBe("N");
+  });
+
   it("throws (as truncation) when the inferred pawn source is empty", () => {
     // "c5" as White's first move implies c3 or c4 holds a white pawn — neither
     // does. The old code silently 'moved' an empty square.
