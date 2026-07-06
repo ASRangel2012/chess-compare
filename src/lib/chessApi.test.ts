@@ -228,6 +228,98 @@ describe("chessApi network resilience", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("falls back to exponential backoff when Retry-After is missing", async () => {
+    // Regression: `Number(null) === 0`, so a missing header used to become a
+    // 0 ms wait — zero-delay retries and a dead exponential-backoff branch.
+    vi.useFakeTimers();
+    const payload = { archives: [] as string[] };
+    let calls = 0;
+    const fetchMock = vi.fn(async () => {
+      calls++;
+      if (calls === 1) {
+        return {
+          ok: false,
+          status: 429,
+          headers: { get: () => null }, // no Retry-After at all
+          json: async () => ({}),
+        } as unknown as Response;
+      }
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        json: async () => payload,
+      } as unknown as Response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const pending = fetchArchives("retryuser-noheader");
+    // First-attempt fallback is 2**0 * 500 = 500ms: no retry may fire earlier.
+    await vi.advanceTimersByTimeAsync(499);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(2);
+    await expect(pending).resolves.toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("clamps a hostile Retry-After to the sanity ceiling", async () => {
+    vi.useFakeTimers();
+    const payload = { archives: [] as string[] };
+    let calls = 0;
+    const fetchMock = vi.fn(async () => {
+      calls++;
+      if (calls === 1) {
+        return {
+          ok: false,
+          status: 429,
+          headers: { get: (h: string) => (h === "Retry-After" ? "3600" : null) },
+          json: async () => ({}),
+        } as unknown as Response;
+      }
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        json: async () => payload,
+      } as unknown as Response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const pending = fetchArchives("retryuser-clamp");
+    // The 3600s hint must be capped at 60s — not honored for an hour.
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(2);
+    await expect(pending).resolves.toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("abort interrupts a pending 429 backoff instead of sleeping it out", async () => {
+    // Regression for the dangling-sleep hole: the caller's signal governed
+    // only the fetch, so an abort during backoff left the old run parked for
+    // the full Retry-After — and any new run sharing the cached promise
+    // inherited the wait.
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const fetchMock = vi.fn(async () => ({
+      ok: false,
+      status: 429,
+      headers: { get: (h: string) => (h === "Retry-After" ? "3600" : null) },
+      json: async () => ({}),
+    }) as unknown as Response);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const pending = fetchArchives("retryuser-abortsleep", {
+      signal: controller.signal,
+    });
+    const assertion = expect(pending).rejects.toSatisfy(isAbortError);
+    // Let the 429 land and the backoff start, then cancel mid-sleep.
+    await vi.advanceTimersByTimeAsync(1_000);
+    controller.abort();
+    await assertion;
+    expect(fetchMock).toHaveBeenCalledTimes(1); // no retry after cancellation
+  });
+
   it("maps a timed-out (aborted) request to a friendly error", async () => {
     vi.useFakeTimers();
     const fetchMock = vi.fn(

@@ -14,6 +14,16 @@ const REQUEST_TIMEOUT_MS = 15_000;
 const ARCHIVE_CONCURRENCY = 6;
 /** Retry attempts when Chess.com rate-limits us (HTTP 429). */
 const MAX_RATE_LIMIT_RETRIES = 3;
+/**
+ * Sanity ceiling on any single 429 backoff wait. A hostile or buggy
+ * Retry-After (say, 3600) must not park a request — and, via the promise
+ * cache, every caller sharing it — for an hour. Legitimate hints below the
+ * ceiling are honored as-is; early retry against the server's wishes is worse
+ * citizenship than giving up.
+ */
+const MAX_RETRY_WAIT_MS = 60_000;
+/** Total backoff budget across all retries of one logical request. */
+const RETRY_BUDGET_MS = 90_000;
 /** How many monthly archives the head-to-head scan looks back over. */
 export const HEAD_TO_HEAD_MAX_ARCHIVES = 48;
 
@@ -86,7 +96,46 @@ function cacheSet(key: string, promise: Promise<unknown>): void {
   }
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/**
+ * Abort-aware sleep. A bare setTimeout promise is unreachable by every other
+ * piece of abort machinery in this file: the caller's signal only governs the
+ * fetch, and the per-request timeout aborts a controller whose fetch has
+ * already settled by the time we back off. Without this, a hostile
+ * Retry-After parked a cancelled run mid-backoff until the timer ran out.
+ */
+const sleep = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(
+        signal!.reason instanceof Error
+          ? signal!.reason
+          : new DOMException("The operation was aborted.", "AbortError")
+      );
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+
+/**
+ * Parse a Retry-After header into milliseconds, or NaN when absent or
+ * unusable. Careful: `Number(null) === 0`, so a *missing* header must be
+ * rejected before coercion — the old code turned "no header" into a 0 ms
+ * wait, which made the exponential-backoff fallback dead code and retried
+ * with zero delay. (HTTP-date form coerces to NaN and falls back too.)
+ */
+function retryAfterMs(header: string | null): number {
+  if (header === null || header.trim() === "") return NaN;
+  const secs = Number(header);
+  return Number.isFinite(secs) && secs >= 0 ? secs * 1000 : NaN;
+}
 
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) {
@@ -97,6 +146,7 @@ function throwIfAborted(signal?: AbortSignal): void {
 }
 
 async function requestJson<T>(url: string, signal?: AbortSignal): Promise<T> {
+  let backoffSpentMs = 0;
   for (let attempt = 0; ; attempt++) {
     throwIfAborted(signal);
     // Combine the caller's signal with the per-request timeout: either one
@@ -117,14 +167,22 @@ async function requestJson<T>(url: string, signal?: AbortSignal): Promise<T> {
     try {
       const res = await fetch(url, { signal: fetchSignal });
 
-      // Honor Chess.com rate limiting with a bounded backoff before giving up.
+      // Honor Chess.com rate limiting with a bounded backoff before giving up:
+      // each wait is capped at MAX_RETRY_WAIT_MS, the total across attempts at
+      // RETRY_BUDGET_MS, and the sleep itself is abort-aware so cancelling a
+      // run interrupts a pending backoff instead of letting it run out.
       if (res.status === 429 && attempt < MAX_RATE_LIMIT_RETRIES) {
-        const retryAfter = Number(res.headers.get("Retry-After"));
-        const waitMs = Number.isFinite(retryAfter)
-          ? retryAfter * 1000
-          : 2 ** attempt * 500;
-        await sleep(waitMs);
-        continue;
+        const hinted = retryAfterMs(res.headers.get("Retry-After"));
+        const waitMs = Math.min(
+          Number.isNaN(hinted) ? 2 ** attempt * 500 : hinted,
+          MAX_RETRY_WAIT_MS
+        );
+        if (backoffSpentMs + waitMs <= RETRY_BUDGET_MS) {
+          backoffSpentMs += waitMs;
+          await sleep(waitMs, signal);
+          continue;
+        }
+        // Budget exhausted — fall through to the user-facing 429 error below.
       }
 
       if (!res.ok) {
